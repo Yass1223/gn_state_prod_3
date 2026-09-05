@@ -1,0 +1,170 @@
+# SoccerNet Game State Reconstruction — clean pipeline.
+#
+# ONE entry config, ONE path through the pipeline. No alternative backends.
+#
+#   bbox_detector  YOLO11-L "HM" fine-tune (HF Ynniss/YOLOv11L_HM)      -> bbox_ltwh, bbox_conf
+#                  (default; the frozen-baseline fine-tune yolov11_sn_best is the
+#                   alternative via the defaults group:
+#                   `modules/bbox_detector=yolo_ultralytics_snft`
+#                   — same operating point, different weights; see either detector config
+#                   for cache notes)
+#   track          BoT-SORT · SOF + OSNet-AIN (boxmot)        -> track_id
+#   crop_filter    single/multi label, tracked-only rule      -> crop_single, crop_rT, crop_rB, crop_trigger
+#   calibration    BroadTrack (EVS, WACV'25) + image-to-pitch -> parameters, bbox_pitch
+#   pitch_gate     off-pitch tracklets (mean bbox_pitch outside  -> track_id NaN on their rows,
+#                  105x68 m + margin_m; on/off switch)             track_id_pregate, pitch_gate_offpitch
+#   tracklet_split DBSCAN tracklet split (SPLIT ONLY), on-pitch  -> track_id (fragments), track_id_presplit
+#                  tracklets only (same OSNet-AIN as the tracker; reads crop_single)
+#   team_embed     osnet_team on sampled SINGLE crops/fragment  -> team_embedding,
+#                  + 2-means TEAM CLUSTERING with a robust           team_cluster (0/1 or NaN),
+#                  distance threshold (kit outliers unclustered)    team_cluster_nearest
+#   jersey_number  jn_pipeline_gsr (legibility -> DBNet++ -> PARSeq + SATRN -> vote_pool), multi-GPU;
+#                  eligibility = at least one single crop (NO role filter)
+#                  + per-fragment maxconf candidate stats  -> jersey_number_candidates, jersey_number_maxconf
+#   traj_refine    the pipeline's ONE merge, on CLUSTER + number evidence: five
+#                  phases of one agglomerative procedure (pools by arrival labels:
+#                  cluster+number / cluster / number / neither, each in isolation,
+#                  then everything) under clean-frame disjointness, re-enter
+#                  consistency and non-contradicting cluster/number labels;
+#                  number-conflict resolution in phases 1/3/5; duplicate-frame
+#                  resolution with dynamic centroids (stage 3); same OSNet-AIN
+#                  as track / tracklet_split
+#                  -> track_id (trajectories), track_id_prerefine + jersey/cluster snapshots
+#   role_team      per-TRAJECTORY roles and sides, AFTER the merge: assistants,
+#                  goalkeepers, main referee (rule 2.14), cluster -> left/right
+#                  naming, fallbacks for unclustered players  -> role, team
+#   tracklet_agg   majority vote over [jersey_number]
+#   audit          per-component PASS/WARN/FAIL verdicts -> audit/<seq>.json (read-only)
+#
+# There is NO `pitch` stage: BroadTrack runs its own keypoint (NBJW) and line (TVCalib)
+# detectors internally and emits camera parameters directly.
+# There is NO `reid` (prtreid) stage any more: the team CLUSTER comes from
+# `team_embed`, roles and sides from the post-refine `role_team` (bbox_pitch);
+# the tracker and the tracklet_split stage use OSNet-AIN. `interpolation` is kept as a module but is NOT in
+# the pipeline: it synthesizes rows that carry neither crop labels nor team embeddings.
+#
+# First-time provisioning (both are Docker-free, Kaggle/Lightning friendly):
+#   bash scripts/setup_broadtrack.sh      # C++ binary + LFS weights, built natively
+#   bash scripts/setup_jn_gsr.sh          # python 3.10 venv + 3 checkpoints
+# Verify the calibration conversion before trusting metrics:
+#   python scripts/verify_broadtrack_conversion.py -c <calib.json> -f <frames dir>
+# Run:
+#   tracklab -cn soccernet
+#   tracklab -cn soccernet modules/bbox_detector=yolo_ultralytics_snft   # frozen-baseline detector
+# Reference metrics (saved separately from the pipeline eval):
+#   python scripts/reference_metrics.py --state states/sn-gamestate.pklz \
+#       --dataset-path data/SoccerNetGS --eval-set test --out reference_metrics
+# Before reporting any metric, refuse a run with a silent stage failure:
+#   python scripts/verify_run_integrity.py     (reads the audit stage's JSON verdicts)
+hf_weights_repo: "Ynniss/sn-gamestate-weights"
+
+defaults:
+  - dataset: soccernet_gs
+  - eval: gs_hota
+  - engine: offline
+  - visualization: gamestate
+  - modules/bbox_detector: yolo_ultralytics_snft_hm
+  - modules/track: botsort_ain
+  - modules/crop_filter: overlap_tracked
+  - modules/tracklet_split: tracklet_split
+  - modules/interpolation: dti
+  - modules/calibration: broadtrack
+  - modules/pitch_gate: pitch_gate
+  - modules/team_embed: osnet_team
+  - modules/role_team: rules
+  - modules/jersey_number_detect: jn_gsr
+  - modules/traj_refine: traj_refine
+  - modules/tracklet_agg: voting_jn
+  - modules/audit: run_audit
+  - _self_
+
+# Pipeline definition. Order is load-bearing:
+#   * crop_filter right after track: the tracked-only rule needs track_id, and every
+#     later stage reads the same crop_single label;
+#   * calibration then pitch_gate BEFORE tracklet_split: the gate needs bbox_pitch,
+#     and gating first means the splitter never works on off-pitch tracklets;
+#   * tracklet_split before team_embed/jersey (both are fragment-level);
+#   * team_embed (embedding + TEAM CLUSTER) and jersey_number_detect before
+#     traj_refine: the one merge decides on cluster + number evidence;
+#   * role_team AFTER traj_refine: roles and sides are assigned once, on the
+#     finished trajectories, where the evidence is strongest;
+#   * audit LAST: it reads every column the other stages produce and writes none.
+pipeline:
+  - bbox_detector
+  - track
+  - crop_filter
+  - calibration
+  - pitch_gate
+  - tracklet_split
+  - team_embed
+  - jersey_number_detect
+  - traj_refine
+  - role_team
+  - tracklet_agg
+  - audit
+
+experiment_name: "sn-gamestate"
+
+# Path definitions
+home_dir: "${oc.env:HOME}"
+data_dir: "${project_dir}/data"
+model_dir: "${project_dir}/pretrained_models"
+
+# TensorRT for the detector only (the OSNet-AIN appearance model has no TensorRT
+# path). Keep false for exact reproduction (FP16 engines are not bit-identical);
+# build with scripts/build_trt_engines.py.
+use_tensorrt: false
+trt_dir: "${model_dir}/trt"
+
+# Numerical precision: the YOLO11 detector (ultralytics half) and the OSNet-AIN
+# embedder in `track` + `tracklet_split` (torch autocast on CUDA, fp32 outputs) run fp16,
+# baked in after the Kaggle fp16/fp32 validation (tracking HOTA 71.61 vs 71.08,
+# GS-HOTA 64.98 vs 64.70, calibration bit-identical; deltas inside run-to-run noise).
+# The team_embed stage runs fp32 with flip TTA, exactly as the notebook it
+# reproduces (9.5 MB model, <= 16 crops per tracklet). Out of reach by
+# construction: BroadTrack (a C++ subprocess), the jersey stage (its own python
+# 3.10 venv), and SOF camera motion (OpenCV on CPU, no fp16 exists).
+
+# Machine configuration
+num_cores: 4
+use_wandb: False
+use_rich: True
+
+modules: # module-specific batch sizes (override the per-module yaml values)
+  bbox_detector: {batch_size: 4}
+  track: {batch_size: 64}
+
+# Flags
+test_tracking: True
+eval_tracking: True
+print_config: False
+
+# Dataset
+dataset:
+  nvid: 1  # -1 for the whole split; start at 1 to validate the setup.
+  eval_set: "test"
+  dataset_path: ${data_dir}/SoccerNetGS
+  vids_dict:
+    valid: []
+    test: []   # e.g. ['SNGS-116'] to pin specific clips
+
+# Tracker state. To iterate on a late stage only: set load_file to a saved .pklz and
+# cut `pipeline:` down to the stages you still want to run.
+state:
+  save_file: "states/${experiment_name}.pklz"
+  load_file: null
+
+# Visualization
+visualization:
+  cfg:
+    save_videos: True
+
+project_dir: "${hydra:runtime.cwd}"
+hydra:
+  output_subdir: "configs"
+  job:
+    chdir: True
+  run:
+    dir: "outputs/${experiment_name}/${now:%Y-%m-%d}/${now:%H-%M-%S}"
+  sweep:
+    dir: "multirun_outputs/${experiment_name}/${now:%Y-%m-%d}/${now:%H-%M-%S}"

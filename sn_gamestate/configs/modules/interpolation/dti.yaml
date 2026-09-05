@@ -1,0 +1,18 @@
+# Linear interpolation of tracklet gaps (DTI), the offline step official BoT-SORT
+# ships as tools/interpolation.py. Would run directly after `split_merge`, on final
+# track ids.
+#
+# NOT in the production pipeline (soccernet.yaml `pipeline:`): synthesized rows
+# carry no crop label (crop_filter runs before split_merge) and no team_embedding,
+# so the role_team stage would meet rows without the columns it reads. The module
+# is kept only for tracking-only experiments (states that stop after this stage and
+# are scored with scripts/reference_metrics.py --skip gsr jersey_number
+# calibration). enabled: false is a true no-op.
+#
+# n_dti / n_min are UNTUNED (the values below are the brief's starting points, not
+# measured optima).
+_target_: sn_gamestate.track.interpolation.LinearInterpolation
+cfg:
+  enabled: false
+  n_dti: 25   # fill a gap only when 1 < dt < n_dti frames
+  n_min: 5    # only tracklets with >= n_min real detections are interpolated

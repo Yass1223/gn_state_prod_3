@@ -1,0 +1,102 @@
+[project]
+name = "sn-gamestate"
+version = "1.0.0"
+description = "SoccerNet Game State Reconstruction — clean pipeline (BoT-SORT·SOF + split_merge + BroadTrack + jn_pipeline_gsr)"
+readme = "README.md"
+requires-python = ">=3.9,<3.10"
+
+# Dependencies of the ACTIVE pipeline only.
+#   Removed vs. the upstream baseline, together with the stages they served:
+#     easyocr, mmocr, mmdet, openmim  -> the MMOCR/EasyOCR jersey stages (replaced by
+#                                        jn_pipeline_gsr, which runs in its own python
+#                                        3.10 venv as subprocess workers and therefore
+#                                        contributes NO dependency to this environment);
+#     transformers, tokenizers        -> pulled in only by the mmocr stack;
+#     lightning                       -> only used by the discarded TVCalib module.
+#   BroadTrack likewise adds nothing here: it is a native C++ binary built by
+#   scripts/setup_broadtrack.sh and invoked as a subprocess.
+dependencies = [
+    "tracklab==1.3.24",
+    "soccernet==0.1.55",
+    "torch==1.13.1",
+    # torchreid (the VlSomers/bpbreid fork) provides the OSNet backbones: osnet_ain_x1_0
+    # for the tracker + split_merge (sn_gamestate/reid/osnet_ain.py) and osnet_x1_0 for the
+    # team-appearance model (sn_gamestate/reid/osnet_team.py). prtreid was removed with
+    # the `reid` stage: role and team now come from the role_team stage.
+    "torchreid @ git+https://github.com/VlSomers/bpbreid",
+    "tracklab_calibration",
+    "numpy==1.26.4",
+    # setuptools 82.0.0 (Feb 2026) removed pkg_resources, which torchmetrics
+    # 0.10.3 still imports (torchmetrics/utilities/imports.py). torchmetrics is
+    # held at 0.10.3 by tracklab for torch 1.13.1 compatibility, so pin the
+    # other side instead. Without this, tracklab.wrappers fails to import.
+    "setuptools<81",
+    # albumentations 2.0 dropped the top-level `functional` export, but the
+    # torchreid fork's data_augmentation/random_occlusion.py does `from
+    # albumentations import (DualTransform, functional)` (imported by
+    # torchreid/__init__ via torchreid.data), and the fork's requirements.txt
+    # leaves albumentations unpinned. Verified working on 1.3.1 and 1.4.24.
+    "albumentations<2",
+    # Used directly by the pipeline: KMeans + DBSCAN (role_team rules) and
+    # DBSCAN(metric="precomputed") (split_merge). Never listed as a dependency and
+    # not pulled in transitively. Python 3.9 caps this at 1.6.1 (scikit-learn 1.7
+    # requires >=3.10); the bound is explicit so relaxing requires-python can't
+    # silently jump versions. Call sites are version-agnostic: the rules use
+    # KMeans(n_init=10) and DBSCAN(metric="cosine"), split_merge uses
+    # DBSCAN(metric="precomputed"), all present since 0.2x.
+    "scikit-learn<1.7",
+    # Crop preprocessing of the team-appearance model (PIL bilinear resize, as the
+    # notebook). Pillow is also a transitive dependency of tracklab/ultralytics; the
+    # explicit entry documents the direct import.
+    "pillow",
+    # huggingface_hub 1.0 removed HfFolder, which a transitive dependency in the
+    # 3.9 resolution still imports. Without this bound, several stages fail
+    # to import (detector, track, MajorityVoteTracklet, TrackEvalEvaluator)
+    # with "cannot import name 'HfFolder'". Kaggle 2026-08-07 resolved 1.8.0.
+    "huggingface_hub>=0.23,<1.0",
+    # Runtime imports of boxmot's BoT-SORT and SOF path, declared here because
+    # boxmot itself is installed with --no-deps (see the note below) and so brings
+    # nothing with it. `lap` is the module name lapx installs under.
+    "lapx",
+    "rich",
+]
+
+# boxmot is a dependency of the `track` stage but is deliberately NOT listed above.
+#
+# boxmot 19.0.0's metadata requires torch>=2.2.1, huggingface-hub>=1.7.1 and
+# pandas>=2.0.0; the first two contradict the pins in this file, so a resolver
+# would either fail or drag torch 2.x in and break tracklab, torchmetrics 0.10.3
+# and the bpbreid torchreid fork. Its actual import chain needs none of that:
+# `boxmot.trackers.botsort.botsort` reaches only numpy, cv2, lap, scipy and rich,
+# plus torch via boxmot/utils/ops.py, which imports it solely for
+# `isinstance(x, torch.Tensor)` dispatch and uses no version-gated API.
+# Requires-Python is >=3.9,<3.13, so python 3.9 is supported.
+#
+# It is therefore installed alongside this project rather than by it:
+#
+#     uv pip install --python .venv --no-deps boxmot==19.0.0
+#
+# scripts/lightning_eval.sh does this immediately after `uv pip install -e .`,
+# and scripts/preflight_imports.py verifies the import in seconds.
+# Pin the version: 19.x exposes BotSort at boxmot.trackers.botsort.botsort, while
+# 20+ moved it to boxmot.trackers.bbox.botsort, and `boxmot.__version__` cannot
+# tell them apart - the 19.0.0 wheel reports "18.0.0".
+
+[project.entry-points.tracklab_plugin]
+sn_gamestate = "sn_gamestate.config_finder:ConfigFinder"
+
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["sn_gamestate*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.txt", "*.rst", "*.yaml", "*.png"]
+
+[project.optional-dependencies]
+dev = ["ipykernel==6.29.4"]
+
+[tool.uv.sources]
+tracklab-calibration = { path = "plugins/calibration", editable = true }

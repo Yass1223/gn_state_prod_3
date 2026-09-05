@@ -1,0 +1,142 @@
+# Run audit -- the LAST pipeline stage. Read-only: it never changes detections.
+#
+# Per sequence, one check per component with what the component was supposed to
+# produce, what was observed, and a verdict (PASS / WARN / FAIL / INFO), written to
+# <out_dir>/<seq>.json and logged as a table. scripts/verify_run_integrity.py reads
+# those files and exits non-zero on any FAIL, so metrics from a run in which a
+# stage silently produced nothing cannot be reported.
+#
+# Components checked: bbox_detector, track+tracklet_split, track internals (BoT-SORT
+# sidecar: frame coverage, camera-motion identity rate, clipped crops, zero
+# embeddings, ran-vs-declared settings/checkpoint, and track==tracklet_split checkpoint
+# pin equality), tracklet_split (sidecar: settings and embedder digest that ran vs
+# configured, NO merge threshold anywhere, inputs it received - clean/overlapping
+# labels, zero embeddings -, per-tracklet split counts consistent with each other
+# and with the detections, output invariants: every tracked row stays assigned,
+# one detection per frame per fragment, every fragment from exactly one source
+# tracklet), crop_filter (labels on every detection,
+# labels consistent with the stored ratios at the configured thresholds, every
+# multi label has a trigger box, vetoes by boxes later left
+# unassigned), calibration (bbox_pitch + camera
+# JSON), pitch_gate (columns on every row, sidecar: switch and margin that ran vs
+# configured, mean position and off-pitch rule recomputed from bbox_pitch vs the
+# stored columns, track_id cleared on off-pitch tracklets iff the gate is enabled,
+# counts vs sidecar; the tracklet_split / crop_filter / calibration checks use the
+# pre-gate ids in track_id_pregate), team_embed (embedding on every tracklet, sidecar: checkpoint digest that
+# ran vs configured, empty/zero embeddings, off-grid tracklets), role_team (valid
+# role on every tracked row, team on every player/keeper, none on referees,
+# per-track constancy, sidecar: parameters that ran vs configured, referee cap,
+# tracklets that reached the rules without an embedding), jersey_number_detect
+# (cache blob: rule vote_pool, sha256 of BOTH checkpoints vs the staged files,
+# every eligible tracklet answered, detection columns consistent with the blob,
+# provisioning provenance of SATRN and PARSeq), traj_refine (snapshots present,
+# sidecar: settings and embedder digest that ran vs configured and vs
+# tracklet_split's pin, row accounting out == in - stage-3b unassigned,
+# tracklets_out == tracklets_in -
+# merges, merge distances <= tau, no frame collision, number/team/role constant
+# per refined track, disabled => untouched; the team_embed / role_team / jersey
+# checks use the pre-refine ids in track_id_prerefine and the jersey snapshot
+# columns), tracklet_agg (jersey_number), and
+# the radar (rows that would have no colour).
+_target_: sn_gamestate.audit.RunAudit
+cfg:
+  out_dir: ${project_dir}/audit
+  # Must match the other stages' configs -- same values as jn_gsr.yaml / broadtrack.yaml.
+  jn_cache_dir: ${project_dir}/jn_cache
+  calib_dir: ${project_dir}/broadtrack_calib
+  # Score below which the calibration stage rejects a frame of the camera JSON
+  # (broadtrack.yaml min_score); frames below it are counted as tracking lost.
+  calib_min_score: ${modules.calibration.cfg.min_score}
+  models_dir: ${project_dir}/plugins/jn_gsr/models
+  parseq_ckpt: parseq_gsr_ft_s1.ckpt
+  satrn_ckpt: recog2/best_recog_word_acc_epoch_10.pth
+  # Jersey eligibility is single-crop presence only (no role filter -- roles are
+  # assigned after traj_refine).
+  # Whether the jersey stage hands only single crops (crop_single) to the
+  # recognisers. Resolved from jn_gsr.yaml; the blob must record the same value,
+  # and with true a tracklet without a single crop is not expected to carry a
+  # number (it is not eligible) and must not carry one.
+  jn_single_crops_only: ${modules.jersey_number_detect.cfg.single_crops_only}
+
+  # Tracker diagnostics sidecars written by the track stage (must equal the track
+  # module's audit_dir), and the declared tracker/embedder configuration to hold the
+  # run against. Everything below resolves through OmegaConf interpolation from the
+  # track and tracklet_split module configs, so the audit compares what RAN (the
+  # sidecar) against what the composed config DECLARES, and fails on any
+  # disagreement — including the two stages pinning different weights.
+  track_sidecar_dir: ${modules.track.cfg.audit_dir}
+  expected_tracker:
+    ain_sha256_track: ${modules.track.cfg.ain_sha256}
+    ain_sha256_tracklet_split: ${modules.tracklet_split.cfg.ain_sha256}
+    ain_file_track: ${modules.track.cfg.ain_file}
+    ain_file_tracklet_split: ${modules.tracklet_split.cfg.ain_file}
+    ain_revision_track: ${modules.track.cfg.ain_revision}
+    ain_revision_tracklet_split: ${modules.tracklet_split.cfg.ain_revision}
+    appearance_thresh: ${modules.track.cfg.hyperparams.appearance_thresh}
+    sof_scale: ${modules.track.cfg.sof_scale}
+
+  # Splitter stage: sidecar location (must equal the module's audit_dir) and
+  # the settings and checkpoint it must have run with. Deliberately NO tau:
+  # the splitter must not merge (the pipeline's one merge is traj_refine) and
+  # the audit FAILS if a merge threshold appears here or in the sidecar.
+  tracklet_split_sidecar_dir: ${modules.tracklet_split.cfg.audit_dir}
+  expected_tracklet_split:
+    eps: ${modules.tracklet_split.cfg.eps}
+    min_samples: ${modules.tracklet_split.cfg.min_samples}
+    ain_sha256: ${modules.tracklet_split.cfg.ain_sha256}
+
+  # Crop filter, team-embedding and role/team stages: sidecar locations (must equal
+  # those modules' audit_dir) and the configuration they must have run with.
+  expected_crop_filter:
+    thr_target: ${modules.crop_filter.cfg.thr_target}
+    thr_other: ${modules.crop_filter.cfg.thr_other}
+    contam_mode: ${modules.crop_filter.cfg.contam_mode}
+  team_embed_sidecar_dir: ${modules.team_embed.cfg.audit_dir}
+  expected_team_embed:
+    sha256: ${modules.team_embed.cfg.team_sha256}
+    pos_stride: ${modules.team_embed.cfg.pos_stride}
+    crops_per_track: ${modules.team_embed.cfg.crops_per_track}
+    cluster_method: ${modules.team_embed.cfg.cluster_method}
+    outlier_k: ${modules.team_embed.cfg.outlier_k}
+  role_team_sidecar_dir: ${modules.role_team.cfg.audit_dir}
+  expected_role_team:
+    params: ${modules.role_team.cfg.params}
+
+  # Pitch-gate stage: sidecar location (must equal the module's audit_dir) and the
+  # switch / margin it must have run with.
+  pitch_gate_sidecar_dir: ${modules.pitch_gate.cfg.audit_dir}
+  expected_pitch_gate:
+    enabled: ${modules.pitch_gate.cfg.enabled}
+    margin_m: ${modules.pitch_gate.cfg.margin_m}
+
+  # Trajectory-refinement stage: sidecar location (must equal the module's
+  # audit_dir) and the settings / checkpoint it must have run with. The stage's
+  # embedder pin must ALSO equal tracklet_split's: tau lives on this embedder's
+  # cosine-distance scale, so different weights would silently change what the
+  # threshold means.
+  traj_refine_sidecar_dir: ${modules.traj_refine.cfg.audit_dir}
+  expected_traj_refine:
+    enabled: ${modules.traj_refine.cfg.enabled}
+    tau: ${modules.traj_refine.cfg.tau}
+    use_reenter: ${modules.traj_refine.cfg.use_reenter}
+    ain_sha256: ${modules.traj_refine.cfg.ain_sha256}
+    ain_sha256_tracklet_split: ${modules.tracklet_split.cfg.ain_sha256}
+
+  # WARN thresholds (shares in [0,1]); FAIL conditions are structural (absent, empty,
+  # inconsistent) and not tunable. Raw counts are always in the JSON.
+  thresholds:
+    empty_frames_warn: 0.20            # frames without any detection
+    tracked_warn: 0.50                 # detections without track_id
+    single_share_warn: 0.30            # tracked detections labelled single, below this = WARN
+    pitch_missing_warn: 0.05           # tracked detections without bbox_pitch
+    embed_missing_warn: 0.01           # tracklets without any team embedding, above this = FAIL
+    off_grid_warn: 0.05                # tracklets with no frame on the stride grid
+    jn_min_eligible_for_zero_fail: 10  # FAIL "0 numbered" only with >= this many eligible tracklets
+    radar_skipped_tracked_warn: 0.05   # tracked rows with a pitch position but no colour
+    cmc_identity_warn: 0.02            # frames falling back to an identity warp (ref notebook)
+    crop_clipped_warn: 0.001           # high-conf crops clipping to nothing (ref notebook)
+    zero_emb_warn: 0.01                # high-conf detections with an all-zero embedding
+    tracklet_split_zero_emb_warn: 0.01 # tracked detections with an all-zero splitter embedding
+    pitch_gate_gated_warn: 0.50        # tracklets off-pitch at the configured margin, above this = WARN (calibration suspect)
+    pitch_gate_no_position_warn: 0.05  # tracklets with no finite bbox_pitch (kept, could not be gated)
+    calib_lost_frames_warn: 0.10       # camera-JSON frames below min_score (tracking lost -> last camera reused)

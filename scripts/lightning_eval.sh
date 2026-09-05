@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+#
+# SoccerNet Game State Reconstruction - evaluation runner (Lightning Studio / Kaggle).
+# Self-healing: patches a known dataset-task bug, downloads only the needed
+# split(s), installs deps into a local .venv, and runs single-worker to avoid
+# the cuDNN/torch_shm_manager issue on the Studio.
+#
+# This repo has a SINGLE entry config (`soccernet`): YOLO11-SNFT ->
+# BoT-SORT·SOF (boxmot + OSNet-AIN) -> crop filter -> tracklet_split (DBSCAN
+# split only, same OSNet-AIN) -> BroadTrack -> osnet_team embeddings ->
+# role/team rules -> jn_pipeline_gsr -> traj_refine (the one merge) -> voting -> audit.
+#
+# BroadTrack and the jersey stage each need a one-off provisioning step (both are
+# Docker-free). Run them before the first evaluation:
+#     bash scripts/setup_broadtrack.sh
+#     bash scripts/setup_jn_gsr.sh
+# Set SKIP_SETUP=1 to skip them once they are cached in persistent storage.
+
+set -euo pipefail
+
+SPLITS="${SPLITS:-test}"
+NVID="${NVID:--1}"
+RESULTS_DIR="${RESULTS_DIR:-eval_results}"
+CONFIG_NAME="${CONFIG_NAME:-soccernet}"
+VENV="${VENV:-.venv}"
+DATA_DIR="data/SoccerNetGS"
+
+echo "=================================================================="
+echo " SoccerNet GSR evaluation | config=${CONFIG_NAME} splits=${SPLITS} nvid=${NVID}"
+echo "=================================================================="
+
+# 1. Dependencies into a local .venv (Python 3.9)
+if ! command -v uv >/dev/null 2>&1; then
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="${HOME}/.local/bin:${PATH}"
+fi
+uv venv --clear --python 3.9 "${VENV}"
+uv pip install --python "${VENV}" -e .
+
+# boxmot: installed OUTSIDE the project's dependency list, with --no-deps. Its
+# 19.0.0 metadata requires torch>=2.2.1 and huggingface-hub>=1.7.1, which
+# contradict this project's pins (torch 1.13.1, hub <1.0) - a resolver would
+# either fail or wreck the environment. Its import chain only needs numpy, cv2,
+# lap, scipy and rich, all of which the project already installs (see the boxmot
+# note in pyproject.toml). Version pinned: 19.x has boxmot.trackers.botsort,
+# 20+ moved it, and __version__ cannot tell them apart.
+uv pip install --python "${VENV}" --no-deps boxmot==19.0.0
+
+# Everything below invokes the venv's interpreter DIRECTLY rather than through
+# `uv run`. There is no uv.lock, so `uv run` performs its own fresh resolution
+# and re-syncs the environment, silently undoing what `uv pip install` just
+# produced (observed: it swapped 12 packages, breaking the
+# torchmetrics -> transformers -> huggingface_hub import chain). Using the
+# interpreter directly keeps one resolver in charge of the environment.
+PYBIN="${VENV}/bin/python"
+TRACKLAB_BIN="${VENV}/bin/tracklab"
+
+# 2. Patch the gamestate-2025 -> 2024 bug in the installed TrackLab
+SNGS=$("${PYBIN}" -c "import tracklab,os;print(os.path.join(os.path.dirname(tracklab.__file__),'wrappers','dataset','soccernet','soccernet_game_state.py'))")
+sed -i 's/gamestate-2025/gamestate-2024/g' "${SNGS}"
+echo "==> Patched dataset task name in ${SNGS}"
+
+# 3. Download only the needed split(s) and unzip into place.
+#    Primary: the SoccerNet server (KAUST) via the SoccerNet pip package.
+#    Fallback: the official Hugging Face mirror SoccerNet/SN-GSR-2024, which
+#    publishes the same <split>.zip files (train/valid/test/challenge) at the
+#    dataset root. Used automatically when the server errors, does not respond,
+#    or leaves no zip behind. The HF download stays in the huggingface_hub cache
+#    and is unzipped from there (no second copy on disk).
+mkdir -p "${DATA_DIR}"
+for split in ${SPLITS}; do
+  if [ ! -d "${DATA_DIR}/${split}" ]; then
+    echo "==> Downloading SoccerNetGS split: ${split} (SoccerNet server)"
+    ZIP="${DATA_DIR}/gamestate-2024/${split}.zip"
+    "${PYBIN}" -c "
+from SoccerNet.Downloader import SoccerNetDownloader
+d = SoccerNetDownloader(LocalDirectory='${DATA_DIR}')
+d.downloadDataTask(task='gamestate-2024', split=['${split}'])
+" || echo "==> SoccerNet server download failed; trying the Hugging Face mirror"
+    # Fallback triggers when the zip is absent, empty, or truncated (a partial
+    # server download has no end-of-central-directory record; reading it is
+    # cheap -- only the central directory is parsed, not the 9 GB payload).
+    if [ ! -s "${ZIP}" ] || ! "${PYBIN}" -c "
+import zipfile, sys
+zipfile.ZipFile(r'${ZIP}').namelist()
+" >/dev/null 2>&1; then
+      echo "==> Falling back to Hugging Face: SoccerNet/SN-GSR-2024 ${split}.zip"
+      ZIP=$("${PYBIN}" -c "
+from huggingface_hub import hf_hub_download
+print(hf_hub_download('SoccerNet/SN-GSR-2024', '${split}.zip', repo_type='dataset'))
+")
+    fi
+    unzip -o "${ZIP}" -d "${DATA_DIR}/${split}"
+  else
+    echo "==> Split '${split}' already present, skipping download."
+  fi
+done
+
+# 4. One-off provisioning of the two subprocess-run stages
+if [ "${SKIP_SETUP:-0}" != "1" ]; then
+  echo "==> Provisioning BroadTrack (native build, no Docker)"
+  bash scripts/setup_broadtrack.sh
+  echo "==> Provisioning the jersey-number pipeline (own venv + weights)"
+  bash scripts/setup_jn_gsr.sh
+fi
+
+# 5. Run evaluation per split (single-worker; data already present)
+mkdir -p "${RESULTS_DIR}"
+for split in ${SPLITS}; do
+  echo "==> Evaluating split: ${split} (nvid=${NVID})"
+  echo "n" | "${TRACKLAB_BIN}" -cn "${CONFIG_NAME}" \
+      dataset.eval_set="${split}" \
+      dataset.nvid="${NVID}" \
+      num_cores=0 \
+      2>&1 | tee "${RESULTS_DIR}/eval_${split}.log"
+done
+
+echo "==> Done. Logs (with metric tables) in ${RESULTS_DIR}/eval_<split>.log"
+echo "==> Reference metrics:"
+echo "    ${VENV}/bin/python scripts/reference_metrics.py \\"
+echo "      --state states/sn-gamestate.pklz --dataset-path ${DATA_DIR} \\"
+echo "      --eval-set ${SPLITS} --out reference_metrics"

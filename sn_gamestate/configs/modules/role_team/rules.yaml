@@ -1,0 +1,42 @@
+# Role (player / goalkeeper / referee) and team SIDE (left / right) per FINAL
+# trajectory. Runs AFTER traj_refine. Since batch 11 the TEAM CLUSTERING IS
+# RECOMPUTED HERE, on the final trajectories: per-trajectory descriptor =
+# L2-normalised median of the trajectory's embedded crops (all merged fragments
+# contribute), then the same kmeans2_threshold rule as team_embed (2-means +
+# robust MAD threshold, outlier_k) -- more crops per descriptor than at fragment
+# level, so cleaner separation and a cleaner outlier signal. The recomputed
+# team_cluster / team_cluster_nearest OVERWRITE the columns (constant per final
+# trajectory); team_embed's fragment-level clustering keeps feeding traj_refine.
+# "Appearance outlier" (= unclustered) refers to THIS clustering.
+#
+# Rules (sn_gamestate/team/role_team_api.py): assistants by the touchline
+# geometry, one per side (several candidates on a side: the one most outlier
+# from both team clusters, i.e. largest distance to its nearer 2-means
+# centroid); goalkeepers by penalty-area depth (one per half); the
+# MAIN referee =
+# among the remaining unclustered trajectories, those whose sampled y-range
+# stays inside the symmetric 90% band of the trajectory means (rule 2.14:
+# max(y_ref) <= band * max_i(mean_y_i) and min(y_ref) >= band * min_i(mean_y_i)),
+# the candidate nearest the assistants; everyone else a player. Sides: the two
+# team clusters are named by the cue chain over player mean-x (side_rule);
+# an unclustered player takes its NEAREST centroid's side
+# (team_cluster_nearest, a flagged fallback); a player with no embedding takes
+# its mean-x half.
+#
+# Geometry thresholds carried over from the notebook's operating point
+# (tau_a/tau_a_sy/tau_m/confirm/side_rule), tau_a and tau_a_sy since adjusted
+# on this pipeline; band is this stage's own.
+# UNTUNED on this pipeline's trajectories: sweep on valid later.
+_target_: sn_gamestate.team.RoleTeamAssignment
+cfg:
+  pos_stride: 5
+  audit_dir: ${project_dir}/audit/role_team
+  params:
+    tau_a: 0.9            # assistant: |mean y| >= tau_a * clip max |mean y|
+    tau_a_sy: 2.0         # assistant: y std must be STRICTLY below this (m)
+    tau_m: 0.30           # position margin that accepts a clustered candidate
+    confirm: outlier      # outlier (= unclustered) | geometry
+    side_rule: keeper     # keeper | vote (others fall back to vote)
+    band: 0.9             # the symmetric 90% band of rule 2.14
+    cluster_method: kmeans2_threshold  # batch 11: recomputed on final trajectories
+    outlier_k: 3.25       # MAD multiplier of the recomputed clustering
