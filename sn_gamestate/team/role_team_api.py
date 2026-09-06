@@ -476,8 +476,10 @@ class RoleTeamAssignment(VideoLevelModule):
         # kit) and never collapses them into one.
         assistant_pair_d = None
         if len(assistant_selection) == 2:
-            ja = int(np.where(tids == assistant_selection[0]["winner"])[0][0])
-            jb = int(np.where(tids == assistant_selection[1]["winner"])[0][0])
+            # tids is a Python list: resolve winners by list.index (np.where
+            # on a list-vs-scalar comparison would yield an empty match)
+            ja = tids.index(assistant_selection[0]["winner"])
+            jb = tids.index(assistant_selection[1]["winner"])
             if has_e[ja] and has_e[jb]:
                 assistant_pair_d = float(
                     1.0 - float(desc[tids[ja]] @ desc[tids[jb]]))

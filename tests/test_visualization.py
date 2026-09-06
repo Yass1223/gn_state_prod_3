@@ -59,9 +59,10 @@ except ImportError:                      # sandbox: minimal import-time stubs
     if "distinctipy" not in sys.modules:
         _stub("distinctipy", get_rgb256=lambda c: tuple(int(255 * x) for x in c))
 
-from sn_gamestate.visualization.players import TeamVisualizer        # noqa: E402
+from sn_gamestate.visualization.players import (TeamVisualizer,      # noqa: E402
+                                                side_letter)
 from sn_gamestate.visualization.pitch import (COLOR_LEFT, COLOR_REFEREE,  # noqa: E402
-                                              radar_color)
+                                              radar_color, radar_label)
 
 BP = {"x_bottom_middle": 0.0, "y_bottom_middle": 0.0}
 
@@ -127,6 +128,27 @@ def test_radar_guards():
                             bbox_pitch=BP)) is None         # untracked
     assert radar_color(dict(track_id=1.0, role="ball", team=None,
                             bbox_pitch=BP)) is None         # ball
+
+
+def test_tag_letters():
+    # bbox tag: L/R by team side (players AND goalkeepers), R for every
+    # referee regardless of team, empty when neither is defined
+    assert side_letter("player", "left") == "L"
+    assert side_letter("player", "right") == "R"
+    assert side_letter("goalkeeper", "left") == "L"
+    assert side_letter("goalkeeper", "right") == "R"
+    assert side_letter("referee", None) == "R"
+    assert side_letter("referee", "left") == "R"     # role wins for referees
+    assert side_letter("player", None) == ""
+    assert side_letter(None, None) == ""
+    # radar disc label: number for players, GK, R for referees, None otherwise
+    assert radar_label("player", 7.0) == "7"
+    assert radar_label("player", float("nan")) is None
+    assert radar_label("goalkeeper", None) == "GK"
+    assert radar_label("goalkeeper", 1.0) == "GK"      # role label wins
+    assert radar_label("referee", None) == "R"
+    assert radar_label("referee", 5.0) == "R"
+    assert radar_label(None, 9.0) is None
 
 
 if __name__ == "__main__":

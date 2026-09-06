@@ -93,9 +93,11 @@ class CompletePlayerEllipse(TeamVisualizer, EllipseDetection):
 class CompletePlayerBBox(TeamVisualizer, EllipseDetection):
     """Professional bounding-box display: team-color rectangle + one compact label.
 
-    The label is a single line above the box — jersey number first, then track id
-    (e.g. ``10 | ID 3``) — on a near-opaque team-color tag, so inference videos read
-    like a broadcast overlay. Ground truth is only drawn if a ground_truth color is
+    The label is a single line above the box — jersey number first, then track id,
+    then the side letter ``L``/``R`` for the team side (e.g. ``10 | ID 3 | L``).
+    Referees carry NO side letter: their tag stays as it is (``ID n``), told apart
+    by the referee colour — on a near-opaque team-color tag, so inference
+    videos read like a broadcast overlay. Ground truth is only drawn if a ground_truth color is
     configured in colors_gs.yaml (it is null in this pipeline: predictions only).
     The role_team stage decides role/team per trajectory (from its single crops)
     and writes them on every row, so multi-crop detections render in the same
@@ -132,6 +134,10 @@ class CompletePlayerBBox(TeamVisualizer, EllipseDetection):
                         lineType=cv2.LINE_AA,
                     )
                     txt = [pprint(v, getattr(detection, v, lambda: None)) for v in self.display_list]
+                    side = side_letter(getattr(detection, "role", None),
+                                       getattr(detection, "team", None))
+                    if side:
+                        txt.append(side)
                     txt = " | ".join([v for v in txt if v != ""])
                     if txt:
                         draw_text(
@@ -147,6 +153,20 @@ class CompletePlayerBBox(TeamVisualizer, EllipseDetection):
                             color_txt=None,
                             alpha_bg=0.85,
                         )
+
+def side_letter(role, team):
+    """The compact side letter for the bbox tag: ``L``/``R`` for the team side
+    (players and goalkeepers). Referees get NO letter -- their box and tag
+    stay as they are, identified by the referee colour alone. Empty when the
+    team is undefined."""
+    if role == "referee":
+        return ""
+    if team == "left":
+        return "L"
+    if team == "right":
+        return "R"
+    return ""
+
 
 def pprint(key, value):
     if key == "track_id" and not pd.isna(value):

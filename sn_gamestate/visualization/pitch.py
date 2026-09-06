@@ -27,8 +27,9 @@ never painted in a neutral colour:
   pipeline degradation -- the audit stage (``sn_gamestate.audit``) counts them
   via ``radar_color`` below; painting them white would only hide it.
 
-The number label is drawn for players with an aggregated ``jersey_number`` and as
-``GK`` for goalkeepers, exactly as before.
+The disc label is the aggregated ``jersey_number`` for players, ``GK`` for
+goalkeepers, and ``R`` for referees (main and assistants; told apart from any
+team by the yellow disc).
 
 Config (all optional, see configs/visualization/gamestate.yaml)::
 
@@ -101,6 +102,18 @@ def radar_color(det):
     return None
 
 
+def radar_label(role, jersey_number):
+    """The disc label: jersey number for players, ``GK`` for goalkeepers,
+    ``R`` for referees (main and assistants), None otherwise."""
+    if role == "goalkeeper":
+        return "GK"
+    if role == "referee":
+        return "R"
+    if role == "player" and not _is_nan(jersey_number):
+        return f"{int(jersey_number)}"
+    return None
+
+
 class Radar(ImageVisualizer):
     """Single prediction radar panel, bottom-centre, low transparency."""
 
@@ -167,12 +180,8 @@ class Radar(ImageVisualizer):
             cv2.circle(image, (px, py), r, color, -1, cv2.LINE_AA)
             cv2.circle(image, (px, py), r, (255, 255, 255), 1, cv2.LINE_AA)
 
-            label = None
             jn = det["jersey_number"] if "jersey_number" in det.index else None
-            if role == "goalkeeper":
-                label = "GK"
-            elif role == "player" and not _is_nan(jn):
-                label = f"{int(jn)}"
+            label = radar_label(role, jn)
             if label:
                 draw_text(
                     image, label, (px, py),
