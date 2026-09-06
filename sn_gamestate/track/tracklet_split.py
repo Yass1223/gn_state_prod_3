@@ -4,53 +4,54 @@ The pipeline's ONE merge lives in ``traj_refine`` (Stage 2); this module only
 breaks tracklets that hold more than one identity into fragments. It performs
 no fragment-to-fragment merging of any kind.
 
-GHOST RULE. Multi-player (non-``crop_single``) detections are ghosts: they are
-never embedded, they take no part in the clustering or in any centroid, and
-they enter no condition anywhere in the pipeline until the final-trajectory
-duplicate resolution inside ``traj_refine``. Here they are only ATTACHED to a
-fragment, by geometry and time alone, so that they follow that fragment's
-cluster through every later merge.
+EMBEDDING SCOPE AND THE GHOST RULE. EVERY tracked detection is embedded --
+single (``crop_single``) and multi alike -- and the per-tracklet DBSCAN runs
+over ALL of them, so multi crops take part in shaping the fragments they sit
+in. The ghost rule is about CONDITIONS, and it is unchanged: fragment
+centroids are means over SINGLE detections only, and multi detections enter
+no merge condition anywhere in the pipeline until the final-trajectory
+duplicate resolution inside ``traj_refine`` (stage 3, after team and role are
+decided per trajectory).
 
-Per tracklet (inputs: unit appearance embeddings ``u = e/||e||`` of its SINGLE
-detections -- multi detections carry zero features and are never used -- plus
-the crop filter's ``crop_single`` label, the chronological frame index and the
-image-space box of every detection):
+Per tracklet with at least one single detection (inputs: unit appearance
+embeddings ``u = e/||e||`` of ALL its detections -- zero rows only where a
+crop failed to embed -- plus the crop filter's ``crop_single`` label):
 
-1. DBSCAN(eps, min_samples) on the precomputed cosine-distance matrix of the
-   SINGLE detections only, yielding fragments and noise points. A tracklet
-   with fewer than ``max(2, min_samples)`` single detections is ONE fragment
-   (of its single detections); a tracklet whose DBSCAN result is all noise is
-   ONE fragment.
-2. Every single noise detection is assigned to the fragment with the nearest
-   centroid (centroids = mean unit embedding over the fragment's single
-   non-zero detections; a fragment with no non-zero embedding has no centroid
-   and cannot attract noise; a zero-embedding noise detection is at cosine
-   distance 1 from everything and falls to the deterministic tie rule --
-   lowest fragment label).
-3. GHOST ATTACHMENT (appearance-free): every multi detection of the tracklet
-   is attached to the fragment of the SAME tracklet whose nearest single
-   detection is closest IN TIME to the ghost's frame; ties break on the
-   image-space centre distance between the ghost's box and that nearest
-   single detection's box, then on the lowest fragment label.
-4. By construction every fragment of a mixed tracklet holds at least one
-   single detection; an all-multi fragment cannot arise, because fragments
-   are formed from single detections only.
+1. DBSCAN(eps, min_samples) on the precomputed cosine-distance matrix over
+   ALL detections (single and multi), yielding raw fragments and noise
+   points. A tracklet with fewer than ``max(2, min_samples)`` detections is
+   ONE fragment; a tracklet whose DBSCAN result is all noise is ONE fragment.
+2. A raw fragment holding at least one single detection is a SINGLE-FRAGMENT;
+   its centroid is the mean unit embedding over its single non-zero
+   detections (multi members never enter a centroid). A raw fragment with NO
+   single detection is an ALL-MULTI FRAGMENT and is DISSOLVED: each of its
+   detections is assigned, individually, to the single-fragment of the SAME
+   tracklet with the nearest centroid (cosine; a centroid-less fragment
+   competes at distance 1; ties break on the lowest fragment label). When
+   DBSCAN yields clusters but not one of them holds a single detection, the
+   tracklet cannot anchor a centroid and stays ONE fragment (deterministic
+   degenerate, like the all-noise case).
+3. Every noise detection -- single or multi -- is assigned to the
+   single-fragment with the nearest centroid, by the same rule.
+
+By construction every fragment therefore holds at least one single detection.
 
 ALL-MULTI TRACKLETS (zero single detections) are dissolved at video level,
 after every other tracklet has been split: each of their detections is
-assigned, individually, to the fragment -- of ANY tracklet -- whose nearest-
-in-time single detection is closest in image space (box-centre distance) to
-the detection's box; ties break on the time gap, then on the lowest fragment
-id. These cross-assigned rows are the only way a fragment can hold rows from
-more than one source tracklet, and the only way two detections of one
-fragment can share a frame -- always multi rows, counted, never hidden. When
-the video holds NO fragment at all (every tracklet all-multi), there is no
-dissolution target: each all-multi tracklet is kept as ONE fragment of its
-own (reported as ``allmulti_kept``).
+assigned, individually, to the fragment -- of ANY tracklet -- with the
+nearest centroid, where the video-level centroids are recomputed from the
+FINAL fragment membership (mean unit embedding over the fragment's single
+non-zero rows; ties break on the lowest fragment id). These cross-assigned
+rows are the only way a fragment can hold rows from more than one source
+tracklet, and the only way two detections of one fragment can share a frame
+-- always multi rows, counted, never hidden. When the video holds NO fragment
+at all (every tracklet all-multi), there is no dissolution target: each
+all-multi tracklet is kept as ONE fragment of its own (reported as
+``allmulti_kept``).
 
 Fragment ids follow the ``split_merge`` convention ``tid * FRAG_BASE + label``
 so a fragment's source tracklet is recoverable by integer division
-(cross-assigned ghost rows carry the TARGET fragment's id, which is the point).
+(cross-assigned rows carry the TARGET fragment's id, which is the point).
 
 Input invariant (the tracker's): one detection per (tracklet, frame). The
 driver validates it and raises on violation; the one-per-frame guarantee of
@@ -70,9 +71,9 @@ def _unit(E):
 
 
 def _centroid(U, rows):
-    """Mean unit embedding over the non-zero rows of ``rows`` (single rows by
-    construction -- ghosts are never handed to this function); None when no
-    row has a non-zero embedding."""
+    """Mean unit embedding over the non-zero rows of ``rows``; None when no
+    row has a non-zero embedding. Callers pass SINGLE rows only -- the ghost
+    rule keeps every centroid single-only."""
     rows = np.asarray(rows, dtype=np.int64)
     if len(rows) == 0:
         return None
@@ -82,93 +83,81 @@ def _centroid(U, rows):
     return None
 
 
-def _centers(boxes):
-    """Image-space box centres of ``bbox_ltwh`` rows."""
-    b = np.asarray(boxes, dtype=np.float64)
-    return np.stack([b[:, 0] + b[:, 2] * 0.5, b[:, 1] + b[:, 3] * 0.5], axis=1)
+def _nearest(U, i, labels, cents):
+    """The label among ``labels`` whose centroid is nearest to row ``i``
+    (cosine distance; a None centroid competes at distance 1.0; ties break
+    on the lowest label -- iteration order plus a strict comparison)."""
+    best, best_d = None, None
+    for c in labels:
+        mu = cents[c]
+        d = 1.0 if mu is None else float(1.0 - U[i] @ mu)
+        if best is None or d < best_d - 1e-12:
+            best, best_d = c, d
+    return best
 
 
-def split_tracklet(U, single, frames, boxes, eps, min_samples):
+def split_tracklet(U, single, eps, min_samples):
     """One tracklet -> fragment label per detection (0..k-1), plus counts.
 
-    ``U`` (n, d) unit embeddings (zero rows on the multi detections -- they are
-    never read), ``single`` (n,) bool, ``frames`` (n,) int chronological frame
-    index, ``boxes`` (n, 4) float ``bbox_ltwh``. Returns
-    ``(labels, k, n_noise, n_ghosts)``. Must not be called on an all-multi
-    tracklet (no single detection): those are dissolved at video level --
-    ``split_video`` handles them.
+    ``U`` (n, d) unit embeddings of ALL the tracklet's detections (zero rows
+    only on failed crops), ``single`` (n,) bool. Returns ``(labels, k,
+    n_noise, mf_rows, mf_frags)``: the final label per detection, the final
+    fragment count, the number of noise detections attached (single and
+    multi), the number of rows re-assigned out of dissolved all-multi
+    fragments, and the number of all-multi fragments dissolved. Must not be
+    called on an all-multi tracklet (no single detection): those are
+    dissolved at video level -- ``split_video`` handles them.
     """
     n = len(U)
     single = np.asarray(single, dtype=bool)
-    frames = np.asarray(frames, dtype=np.int64)
-    s_idx = np.where(single)[0]
-    if len(s_idx) == 0:
+    if not single.any():
         raise ValueError("split_tracklet must not receive an all-multi "
                          "tracklet; split_video dissolves those")
     lab = np.full(n, -1, dtype=np.int64)
 
-    # 1. DBSCAN over the single detections only
-    if len(s_idx) < max(2, int(min_samples)):
-        lab[s_idx] = 0
-        n_noise = 0
-    else:
-        Us = U[s_idx]
-        D = np.clip(1.0 - Us @ Us.T, 0.0, 2.0)
-        ls = DBSCAN(eps=eps, min_samples=int(min_samples),
-                    metric="precomputed").fit_predict(D).astype(np.int64)
-        if not (ls >= 0).any():                      # all noise: one fragment
-            ls[:] = 0
-            n_noise = 0
-        else:
-            n_noise = int((ls == -1).sum())
-        lab[s_idx] = ls
+    # 1. DBSCAN over ALL detections (single and multi)
+    if n < max(2, int(min_samples)):
+        lab[:] = 0
+        return lab, 1, 0, 0, 0
+    D = np.clip(1.0 - U @ U.T, 0.0, 2.0)
+    ls = DBSCAN(eps=eps, min_samples=int(min_samples),
+                metric="precomputed").fit_predict(D).astype(np.int64)
+    clusters = sorted(int(c) for c in np.unique(ls) if c >= 0)
+    sf = [c for c in clusters if single[ls == c].any()]
+    if not sf:              # all noise, or no cluster holds a single detection
+        lab[:] = 0
+        return lab, 1, 0, 0, 0
+    lab[:] = ls
 
-    clusters = sorted(int(c) for c in np.unique(lab[s_idx]) if c >= 0)
-    cents = {c: _centroid(U, s_idx[lab[s_idx] == c]) for c in clusters}
+    # 2. centroids: SINGLE non-zero members only (the ghost rule); all-multi
+    #    fragments dissolve per detection to the nearest single-fragment
+    cents = {c: _centroid(U, np.where((ls == c) & single)[0]) for c in sf}
+    mf = [c for c in clusters if c not in sf]
+    mf_rows = 0
+    for c in mf:
+        for i in np.where(ls == c)[0]:
+            lab[i] = _nearest(U, i, sf, cents)
+            mf_rows += 1
 
-    # 2. single noise -> nearest fragment centroid (tie: lowest label)
-    for i in s_idx[lab[s_idx] == -1]:
-        best, best_d = None, None
-        for c in clusters:
-            mu = cents[c]
-            d = 1.0 if mu is None else float(1.0 - U[i] @ mu)
-            if best is None or d < best_d - 1e-12:
-                best, best_d = c, d
-        lab[i] = best
-
-    # 3. ghost attachment: appearance-free, time first, then space, then label
-    ctr = _centers(boxes)
-    m_idx = np.where(~single)[0]
-    frag_sf = {c: np.sort(s_idx[lab[s_idx] == c]) for c in clusters}
-    for i in m_idx:
-        f = int(frames[i])
-        best = None                       # (dt, dist, label)
-        for c in clusters:
-            rows = frag_sf[c]
-            dts = np.abs(frames[rows] - f)
-            j = int(np.argmin(dts))       # earliest row on a time-gap tie
-            dt = int(dts[j])
-            dist = float(np.hypot(*(ctr[i] - ctr[rows[j]])))
-            key = (dt, dist, c)
-            if best is None or key < best:
-                best = key
-        lab[i] = best[2]
-    n_ghosts = int(len(m_idx))
+    # 3. noise (single or multi) -> nearest single-fragment centroid
+    noise_rows = np.where(ls == -1)[0]
+    for i in noise_rows:
+        lab[i] = _nearest(U, i, sf, cents)
 
     # compact relabel 0..k-1 preserving cluster order
     order = {c: k for k, c in enumerate(sorted(set(int(x) for x in lab)))}
     lab = np.array([order[int(x)] for x in lab], dtype=np.int64)
-    return lab, len(order), n_noise, n_ghosts
+    return lab, len(order), int(len(noise_rows)), int(mf_rows), int(len(mf))
 
 
-def split_video(E, single, frames, track_ids, boxes, eps, min_samples):
+def split_video(E, single, frames, track_ids, eps, min_samples):
     """All tracklets of one video.
 
-    Aligned arrays over TRACKED detections: ``E`` (n, d) embeddings (zero rows
-    on every multi detection and on failed single crops), ``single`` (n,)
-    bool, ``frames`` (n,) int (equality == same frame), ``track_ids`` (n,)
-    int, ``boxes`` (n, 4) float ``bbox_ltwh``. Raises on a duplicated
-    (tracklet, frame) pair -- the tracker invariant.
+    Aligned arrays over TRACKED detections: ``E`` (n, d) appearance
+    embeddings of ALL detections (zero rows only on failed crops), ``single``
+    (n,) bool, ``frames`` (n,) int (equality == same frame), ``track_ids``
+    (n,) int. Raises on a duplicated (tracklet, frame) pair -- the tracker
+    invariant.
 
     Returns ``(frag, per_tracklet, video_report)``: ``frag[i]`` the fragment
     id of row i (``tid * FRAG_BASE + label``; cross-assigned rows carry their
@@ -180,12 +169,10 @@ def split_video(E, single, frames, track_ids, boxes, eps, min_samples):
     single = np.asarray(single, dtype=bool)
     frames = np.asarray(frames, dtype=np.int64)
     track_ids = np.asarray(track_ids, dtype=np.int64)
-    boxes = np.asarray(boxes, dtype=np.float64)
     n = len(E)
-    if not (len(single) == len(frames) == len(track_ids) == n
-            and boxes.shape == (n, 4)):
-        raise ValueError("E, single, frames, track_ids and boxes must have "
-                         "one entry per detection")
+    if not (len(single) == len(frames) == len(track_ids) == n):
+        raise ValueError("E, single, frames and track_ids must have one "
+                         "entry per detection")
     pairs = set()
     for t, f in zip(track_ids, frames):
         key = (int(t), int(f))
@@ -195,7 +182,6 @@ def split_video(E, single, frames, track_ids, boxes, eps, min_samples):
         pairs.add(key)
 
     U = _unit(E)
-    ctr = _centers(boxes)
     frag = np.full(n, -1, dtype=np.int64)
     per_tracklet = []
     allmulti = []
@@ -204,45 +190,33 @@ def split_video(E, single, frames, track_ids, boxes, eps, min_samples):
         entry = dict(track_id=int(tid), n=int(len(idx)),
                      n_single=int(single[idx].sum()),
                      n_multi=int((~single[idx]).sum()),
-                     k=0, noise=0, ghosts=0, allmulti=False)
+                     k=0, noise=0, multifrag_rows=0, multifrag_dissolved=0,
+                     allmulti=False)
         if not single[idx].any():
             entry["allmulti"] = True
             allmulti.append((int(tid), idx))
             per_tracklet.append(entry)
             continue
-        lab, k, n_noise, n_ghosts = split_tracklet(
-            U[idx], single[idx], frames[idx], boxes[idx], eps, min_samples)
+        lab, k, n_noise, mf_rows, mf_frags = split_tracklet(
+            U[idx], single[idx], eps, min_samples)
         frag[idx] = int(tid) * FRAG_BASE + lab
-        entry.update(k=int(k), noise=int(n_noise), ghosts=int(n_ghosts))
+        entry.update(k=int(k), noise=int(n_noise),
+                     multifrag_rows=int(mf_rows),
+                     multifrag_dissolved=int(mf_frags))
         per_tracklet.append(entry)
 
-    # all-multi tracklets: dissolve across the video (space first at the
-    # nearest-in-time single detection, then time gap, then fragment id)
+    # all-multi tracklets: dissolve across the video by APPEARANCE -- each
+    # detection to the fragment with the nearest single-only centroid,
+    # recomputed from the final fragment membership
     video_report = dict(allmulti_tracklets=[int(t) for t, _ in allmulti],
                         rows_cross_assigned=0, allmulti_kept=0)
     frag_ids = sorted(int(f) for f in np.unique(frag) if f >= 0)
     if allmulti and frag_ids:
-        # single rows per fragment, sorted by frame, for the nearest-in-time
-        # lookup (fragments hold their own tracklet's singles only here)
-        by_frag = {}
-        for fid in frag_ids:
-            rows = np.where((frag == fid) & single)[0]
-            order = np.argsort(frames[rows], kind="stable")
-            by_frag[fid] = rows[order]
+        cents = {fid: _centroid(U, np.where((frag == fid) & single)[0])
+                 for fid in frag_ids}
         for tid, idx in allmulti:
             for i in idx:
-                f = int(frames[i])
-                best = None               # (dist, dt, fid)
-                for fid in frag_ids:
-                    rows = by_frag[fid]
-                    dts = np.abs(frames[rows] - f)
-                    j = int(np.argmin(dts))
-                    dt = int(dts[j])
-                    dist = float(np.hypot(*(ctr[i] - ctr[rows[j]])))
-                    key = (dist, dt, fid)
-                    if best is None or key < best:
-                        best = key
-                frag[i] = best[2]
+                frag[i] = _nearest(U, i, frag_ids, cents)
                 video_report["rows_cross_assigned"] += 1
     elif allmulti:
         # no dissolution target anywhere: keep each all-multi tracklet as one

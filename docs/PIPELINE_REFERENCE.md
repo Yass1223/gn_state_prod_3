@@ -20,8 +20,9 @@ descriptors; outliers by 2-means+MAD AND a per-2-means-cluster DBSCAN; geometry-
 assistants/goalkeepers; main referee = outlier + band (2.14) + appearance closest to
 the assistants). `team_cluster`/`team_cluster_nearest` remain as inert snapshots.
 Not yet exercised on Kaggle.
-**Redesigned 2026-09-06** (§10): single-only splitter DBSCAN with ghost
-attachment and all-multi dissolution; `kmeans2_nearest` team clustering (every
+**Redesigned 2026-09-06** (§10): all-detection splitter DBSCAN with single-only
+centroids and appearance attachment (revised the same day from a single-only
+DBSCAN with time/space ghost attachment); `kmeans2_nearest` team clustering (every
 embedded fragment gets a cluster, no outlier threshold); the merge rebuilt as
 THREE phases over a label partition (S1 cluster+number known with NO distance
 threshold, S2 cluster-only within tau, FINAL pooled within tau; NO re-enter
@@ -120,7 +121,7 @@ must be launched from the repository root; outputs go to `outputs/sn-gamestate/<
 | `bbox_detector` | `sn_gamestate.bbox_detector.yolo_snft_api.YOLOUltralyticsSNFT` | Defaults-group switch between two YOLO11-L fine-tunes, same module and operating point (imgsz 1280, conf floor 0.1 kept with `>=`, iou 0.7, max_det 300, RGB→BGR fix; optional TensorRT, off by default). **Default (since 2026-09-03): `yolo_ultralytics_snft_hm`** — HF `${hf:Ynniss/YOLOv11L_HM,best.zip,yolov11l_hm_best.pt}` (the 3-arg resolver form copies the download under a .pt name). Alternative: `yolo_ultralytics_snft` — `${hf:Ynniss/sn-gamestate-weights,yolov11_sn_best.pt}` (the run-4 baseline detector). Distinct `engine_path` per variant; `build_trt_engines.py` builds only the snft engine (missing engine ⇒ warn + PyTorch fallback) |
 | `track` | `sn_gamestate.track.bot_sort.BotSortSOF` | boxmot BotSort called directly; embeddings injected from the shared OSNet-AIN module; SOF camera motion (scale 0.15) computed outside; thresholds: high 0.3, low 0.05, new 0.4, match 0.85, proximity 0.5, appearance 0.35, buffer 60, frame_rate 25; fp16 autocast, fp32 outputs; per-frame audit sidecar `audit/track/` |
 | `crop_filter` | `sn_gamestate.crop_filter.CropFilter` | single iff rT ≤ 0.25 and rB < 0.40, contaminators must carry a track_id (`contam_mode: tracked`); writes `crop_single/crop_rT/crop_rB/crop_trigger`; removes nothing |
-| `tracklet_split` | `sn_gamestate.track.tracklet_split_api.TrackletSplit` | Runs AFTER the pitch gate, on on-pitch tracklets only. Stage 1 of the refinement method, SPLIT ONLY — the pipeline's one merge is `traj_refine`, and the audit FAILS on any merge threshold or merging evidence here. Since 2026-09-06 the split is SINGLE-ONLY (ghost rule): per tracklet, DBSCAN (eps 0.2, min_samples 5, precomputed cosine) over the SINGLE (`crop_single`) detections only; multi-crop detections are unembedded GHOSTS attached afterwards by time (interval containment), then space (nearest interval edge), then label order; an ALL-MULTI fragment (its tracklet has other fragments) dissolves per-detection into the nearest fragment of the same tracklet; an ALL-MULTI TRACKLET dissolves per-detection into the nearest fragment across the whole video, with degenerate all-multi groups kept (`allmulti_kept`). Fragment ids offset by FRAG_BASE 10000; every tracked row stays assigned; incoming id snapshotted in `track_id_presplit`; validates the tracker invariant; same OSNet-AIN pin as `track` (audit-enforced); sidecar `audit/tracklet_split/`; algorithm `track/tracklet_split.py` (numpy+sklearn, 16 unit tests in `tests/test_tracklet_split.py`) |
+| `tracklet_split` | `sn_gamestate.track.tracklet_split_api.TrackletSplit` | Runs AFTER the pitch gate, on on-pitch tracklets only. Stage 1 of the refinement method, SPLIT ONLY — the pipeline's one merge is `traj_refine`, and the audit FAILS on any merge threshold or merging evidence here. Since 2026-09-06 (revised the same day): EVERY tracked detection is embedded — single and multi crops alike — and the per-tracklet DBSCAN (eps 0.2, min_samples 5, precomputed cosine) runs over ALL of them; multi crops remain GHOSTS for every CONDITION (fragment centroids are means over SINGLE non-zero members only, and no merge condition downstream reads a multi row until traj_refine's stage 3). A raw fragment with no single detection is DISSOLVED per detection to the nearest single-fragment centroid of the same tracklet; every DBSCAN noise detection (single or multi) attaches to the nearest single-fragment centroid by appearance — so every fragment holds at least one single detection. An ALL-MULTI TRACKLET dissolves per-detection across the whole video to the fragment with the nearest single-only centroid (recomputed from the final membership), with degenerate all-multi groups kept (`allmulti_kept`); a tracklet with fewer than max(2, min_samples) detections, an all-noise DBSCAN result, or clusters holding no single detection stays ONE fragment. Fragment ids offset by FRAG_BASE 10000; every tracked row stays assigned; incoming id snapshotted in `track_id_presplit`; validates the tracker invariant; same OSNet-AIN pin as `track` (audit-enforced); sidecar `audit/tracklet_split/`; algorithm `track/tracklet_split.py` (numpy+sklearn, 17 unit tests in `tests/test_tracklet_split.py`) |
 | `calibration` | `sn_gamestate.calibration.broadtrack_api.BroadTrackCalibration` | BroadTrack binary at `pretrained_models/broadtrack/`; camera prior (0, 55, −12); `min_score 0.3` rejects lost frames and reuses the last accepted camera (`use_prev_parameters: true`, `max_carry_frames 0`); per-sequence JSON cache `broadtrack_calib/` (`use_cached_json: true`); writes human-bbox masks from own detections; `staging_dir` for read-only datasets; emits camera `parameters` and `bbox_pitch` |
 | `pitch_gate` | `sn_gamestate.pitch_gate.PitchGate` | enabled, margin_m 3.5 (untuned); off-pitch iff |mean_x| > 52.5+m or |mean_y| > 34+m on the tracklet mean of finite `bbox_pitch`; gated tracklets: `track_id` → NaN, original kept in `track_id_pregate`; no row deleted; sidecar `audit/pitch_gate/` |
 | `team_embed` | `sn_gamestate.team.TeamEmbedding` | Embeddings AND the sequence's TEAM CLUSTERING. Embeds only the sampled SINGLE crops (`crop_single`) per fragment — ≤ 16 on the stride-5 grid, osnet_team (OSNet x1.0, 128×64, 256-d, fp32 + flip TTA, HF `Ynniss/osnet_team/osnet_team_best.pt`); a fragment with no single crop gets no embedding. Fragment descriptor = L2-normalised median of its embedded crops; **`cluster_method: kmeans2_nearest` (default since 2026-09-06)**: 2-means (the notebook's seeded k-means from `team/rules.py`), then EVERY embedded fragment takes its nearest centroid — NO outlier threshold, `team_cluster` NaN only for fragments with no descriptor. The `kmeans2_threshold` variant (m/MAD rule with outlier_k 3.25) is kept as a config switch for comparison; under the nearest default `outlier_k` is recorded but inert. Writes `team_cluster` (0.0/1.0/NaN, constant per fragment) and `team_cluster_nearest` (identical to `team_cluster` under the nearest method; an inert diagnostic snapshot — the audit's per-fragment coverage carrier, not read by `role_team`). Anonymous cluster ids: no left/right naming and no roles here. `team_sha256` currently **null** (recorded, not enforced — pin after first verified run); sidecar `audit/team_embed/` (cluster block: method, sizes, centroid gap, fragments_no_single; m/s/s_ok only when the threshold variant runs) |
@@ -868,11 +869,16 @@ exercised on Kaggle **[unverified]** — §3 rows for `tracklet_split`, `team_em
 `role_team`, `jersey_number_detect`, `traj_refine` and `audit` describe the resulting
 CURRENT behaviour; this section lists what changed against the batch-13 state:
 
-1. **Splitter ghost rule** (`tracklet_split`): DBSCAN over SINGLE detections only;
-   multi-crop detections attached afterwards as unembedded ghosts (time → space →
-   label); all-multi fragments dissolve into the nearest same-tracklet fragment;
-   all-multi TRACKLETS dissolve video-wide (degenerates kept, `allmulti_kept`).
-   16 unit tests (was 12).
+1. **Splitter rebuilt** (`tracklet_split`, revised later the same day): EVERY tracked
+   detection is embedded (single and multi) and the per-tracklet DBSCAN runs over ALL
+   of them; fragment centroids are SINGLE-only (the ghost rule now governs conditions,
+   not embeddings); DBSCAN noise — single or multi — attaches to the nearest
+   single-fragment centroid by appearance; an all-multi FRAGMENT dissolves per
+   detection to the nearest single-fragment of its tracklet; an all-multi TRACKLET
+   dissolves video-wide by appearance to the nearest single-only fragment centroid
+   (degenerates kept, `allmulti_kept`). The earlier same-day design (single-only
+   DBSCAN, unembedded ghosts attached by time → space → label) is superseded.
+   17 unit tests (was 12).
 2. **Team clustering** (`team_embed`): `cluster_method: kmeans2_nearest` is the
    default — every embedded fragment takes its nearest 2-means centroid, no outlier
    threshold (`kmeans2_threshold` kept as a switch; `outlier_k` inert under nearest).
@@ -903,7 +909,7 @@ CURRENT behaviour; this section lists what changed against the batch-13 state:
 7. **Audit updated** accordingly: traj_refine settings comparison = enabled + tau;
    role labels checked on every tracked row with per-trajectory constancy over all
    rows; kmeans2_nearest coverage clause; retired checks removed.
-8. Unit suites after the redesign: 16 (`test_tracklet_split.py`) + 21
+8. Unit suites after the redesign: 17 (`test_tracklet_split.py`) + 21
    (`test_traj_refine.py`) + stage assertions in `test_stages.py`; jersey fusion
    self-tests cover the tie-break. Files touched: `track/tracklet_split.py`(+api),
    `team/team_embed_api.py`, `team/role_team_api.py`, `refine/traj_refine.py`(+api),
