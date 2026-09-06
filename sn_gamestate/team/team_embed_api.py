@@ -9,17 +9,20 @@ embedded crops (float32, the notebook's convention).
 
 The fragment descriptors of the sequence are then clustered into TEAM CLUSTERS
 -- anonymous kit ids, no left/right naming and no roles (those are assigned
-after ``traj_refine``, on finished trajectories). ``team_cluster_nearest``
-additionally records every embedded fragment's nearest centroid BEFORE the
-threshold -- the role/side stage's fallback for unclustered trajectories.
-Method ``kmeans2_threshold``:
-2-means (the notebook's seeded k-means), then the robust distance rule -- with
-``d`` each fragment's Euclidean distance to its nearest centroid, ``m`` the
-median of ``d`` and ``s`` its MAD, a fragment is UNCLUSTERED when
-``s >= 0.05*m`` (the scale is meaningful) and ``d > m + outlier_k*s``; so
-referees and other kit outliers get no cluster. Fragments without an embedding
-are unclustered too. ``cluster_method`` is a config switch so alternative
-clusterings can be compared.
+after ``traj_refine``, on finished trajectories, from appearance the role/side
+stage recomputes itself). ``team_cluster_nearest`` records every embedded
+fragment's nearest centroid -- the run audit's per-fragment coverage carrier
+(``team_embedding`` itself is dropped by ``traj_refine`` after the merge).
+Method ``kmeans2_nearest`` (the default): 2-means (the notebook's seeded
+k-means) over the descriptors; EVERY embedded fragment takes its nearest
+centroid as its cluster id -- no outlier threshold, so the merge downstream
+can require cluster equality on every fragment that has a descriptor. Only a
+fragment without an embedding has no cluster. Method ``kmeans2_threshold``
+(kept for comparison): as above, then the robust distance rule -- with ``d``
+each fragment's Euclidean distance to its nearest centroid, ``m`` the median
+of ``d`` and ``s`` its MAD, a fragment is UNCLUSTERED when ``s >= 0.05*m``
+(the scale is meaningful) and ``d > m + outlier_k*s``. ``cluster_method`` is
+the config switch between them.
 
 Output columns: ``team_embedding`` (float32 vector on the sampled single rows,
 None elsewhere) and ``team_cluster`` (0.0/1.0 on every row of a clustered
@@ -77,8 +80,8 @@ class TeamEmbedding(VideoLevelModule):
         self.stride = int(getattr(cfg, "pos_stride", rules.POS_STRIDE))
         self.crops_per_track = int(getattr(cfg, "crops_per_track", rules.CROPS_PER_TRK))
         self.batch_size = int(getattr(cfg, "batch_size", 128))
-        self.cluster_method = str(getattr(cfg, "cluster_method", "kmeans2_threshold"))
-        if self.cluster_method not in ("kmeans2_threshold",):
+        self.cluster_method = str(getattr(cfg, "cluster_method", "kmeans2_nearest"))
+        if self.cluster_method not in ("kmeans2_nearest", "kmeans2_threshold"):
             raise ValueError(f"[team_embed] unknown cluster_method "
                              f"{self.cluster_method!r}")
         self.outlier_k = float(getattr(cfg, "outlier_k", 3.25))
@@ -158,11 +161,12 @@ class TeamEmbedding(VideoLevelModule):
 
         # ------------------------------------------------- team clustering --
         # Fragment descriptor: L2-normalised median of its embedded single
-        # crops. 2-means over the descriptors; the robust distance rule leaves
-        # kit outliers (referees etc.) UNCLUSTERED.
+        # crops. 2-means over the descriptors; kmeans2_nearest gives EVERY
+        # embedded fragment its nearest centroid (no outliers), the
+        # kmeans2_threshold comparison method leaves kit outliers UNCLUSTERED.
         out["team_cluster"] = np.nan
-        # nearest centroid id BEFORE thresholding: the role/side stage's
-        # fallback for trajectories left unclustered (player, nearest kit)
+        # nearest centroid id BEFORE thresholding: an inert diagnostic snapshot
+        # (the audit's per-fragment coverage carrier; not read by role_team)
         out["team_cluster_nearest"] = np.nan
         frag_ids, descs = [], []
         for tid, grp in out[out["track_id"].notna()].groupby("track_id"):
@@ -187,17 +191,21 @@ class TeamEmbedding(VideoLevelModule):
             d_all = np.linalg.norm(E[:, None] - km.cluster_centers_[None], axis=2)
             lab = d_all.argmin(1)
             d = d_all.min(1)
-            m = float(np.median(d))
-            s = float(np.median(np.abs(d - m)))
-            s_ok = s >= 0.05 * m
-            outlier = (d > m + self.outlier_k * s) if s_ok else np.zeros(len(d), bool)
+            if self.cluster_method == "kmeans2_threshold":
+                m = float(np.median(d))
+                s = float(np.median(np.abs(d - m)))
+                s_ok = s >= 0.05 * m
+                outlier = (d > m + self.outlier_k * s) if s_ok \
+                    else np.zeros(len(d), bool)
+                clus.update(s_ok=bool(s_ok), m=round(m, 6), s=round(s, 6))
+            else:                          # kmeans2_nearest: no outliers
+                outlier = np.zeros(len(d), bool)
             for tid, l, is_out in zip(frag_ids, lab, outlier):
                 out.loc[out["track_id"] == tid, "team_cluster_nearest"] = float(l)
                 if not is_out:
                     out.loc[out["track_id"] == tid, "team_cluster"] = float(l)
             clus.update(clustered=int((~outlier).sum()),
                         unclustered_threshold=int(outlier.sum()),
-                        s_ok=bool(s_ok), m=round(m, 6), s=round(s, 6),
                         sizes=[int(((lab == c) & ~outlier).sum()) for c in (0, 1)],
                         centroid_gap=round(float(np.linalg.norm(
                             km.cluster_centers_[0] - km.cluster_centers_[1])), 6))
@@ -207,7 +215,7 @@ class TeamEmbedding(VideoLevelModule):
                  f"{record['frames_read']} frames ({record['crops_empty']} empty, "
                  f"{record['fragments_no_single']} fragment(s) without a single crop); "
                  f"clusters {clus['sizes']}, {n_unclustered} unclustered "
-                 f"({self.cluster_method}, k {self.outlier_k}); no sides, no roles "
+                 f"({self.cluster_method}); no sides, no roles "
                  f"here - they are assigned after traj_refine")
         self._write(record)
         return out

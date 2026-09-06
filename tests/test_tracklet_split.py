@@ -1,5 +1,10 @@
 """Unit tests for sn_gamestate/track/tracklet_split.py (pure numpy, no GPU).
 
+New semantics under test: DBSCAN over SINGLE detections only; multi detections
+are unembedded ghosts attached by time (within a tracklet) or space (all-multi
+tracklets, dissolved across the video); every fragment of a mixed tracklet
+holds a single detection.
+
 Run directly (``python tests/test_tracklet_split.py``) or under pytest.
 """
 import numpy as np
@@ -26,149 +31,192 @@ def near(i, wobble=0.05, seed=0):
     return (v / np.linalg.norm(v)).astype(np.float32)
 
 
-def block(ident, count, single=True, zero=False, wobble=0.03, seed0=0):
+def block(ident, count, single=True, zero=False, wobble=0.03, seed0=0,
+          f0=0, x=100.0):
+    """rows: (embedding, single, frame, box). Ghost rows get ZERO embeddings
+    (the stage never embeds them)."""
     rows = []
     for k in range(count):
-        e = np.zeros(D, np.float32) if zero else near(ident, wobble, seed0 + k)
-        rows.append((e, single))
+        e = np.zeros(D, np.float32) if (zero or not single) \
+            else near(ident, wobble, seed0 + k)
+        rows.append((e, single, f0 + k, [x, 400.0, 40.0, 80.0]))
     return rows
 
 
 def run_split(rows):
     E = np.stack([r[0] for r in rows])
     single = np.array([r[1] for r in rows])
-    return split_tracklet(_unit(E), single, EPS, MINS)
+    frames = np.array([r[2] for r in rows])
+    boxes = np.array([r[3] for r in rows])
+    return split_tracklet(_unit(E), single, frames, boxes, EPS, MINS)
 
 
 def test_two_identities_split():
-    rows = block(0, 8) + block(1, 8)
-    lab, k, n_noise, n_diss = run_split(rows)
-    assert k == 2 and n_diss == 0
+    rows = block(0, 8, f0=0) + block(1, 8, f0=8)
+    lab, k, n_noise, n_ghosts = run_split(rows)
+    assert k == 2 and n_ghosts == 0
     assert len(set(lab[:8])) == 1 and len(set(lab[8:])) == 1
     assert lab[0] != lab[8]
 
 
 def test_single_identity_one_fragment():
-    lab, k, _, _ = run_split(block(0, 12))
+    lab, k, _, _ = run_split(block(0, 10))
     assert k == 1 and set(lab) == {0}
 
 
 def test_small_tracklet_one_fragment():
-    lab, k, n_noise, _ = run_split(block(0, 3))
-    assert k == 1 and n_noise == 0 and set(lab) == {0}
+    lab, k, _, _ = run_split(block(0, 2) + block(1, 2, f0=2))
+    assert k == 1 and set(lab) == {0}
+
+
+def test_few_singles_one_fragment_ghosts_follow():
+    # 3 singles (< max(2, MINS)) + 4 ghosts: one fragment holds everything
+    rows = block(0, 3, f0=0) + block(1, 4, single=False, f0=3)
+    lab, k, _, n_ghosts = run_split(rows)
+    assert k == 1 and set(lab) == {0} and n_ghosts == 4
 
 
 def test_all_noise_one_fragment():
-    # five mutually orthogonal points: DBSCAN(min_samples=5) finds no core
-    rows = [(unit(i), True) for i in range(5)]
+    rng = np.random.RandomState(0)
+    E = rng.randn(8, D).astype(np.float32)
+    rows = [(e, True, i, [100.0, 400.0, 40.0, 80.0]) for i, e in enumerate(E)]
     lab, k, _, _ = run_split(rows)
     assert k == 1 and set(lab) == {0}
 
 
-def test_noise_single_and_multi_attach_to_nearest():
-    # two clear identities + one single-crop and one multi-crop outlier that
-    # lean toward id 1 but sit outside eps (cos sim 0.6 -> distance 0.4 > 0.2)
-    rows = block(0, 8) + block(1, 8)
-    v = 0.6 * unit(1) + 0.8 * unit(3)
-    out_vec = (v / np.linalg.norm(v)).astype(np.float32)
-    outlier_single = (out_vec, True)
-    outlier_multi = (out_vec.copy(), False)
-    lab, k, n_noise, _ = run_split(rows + [outlier_single, outlier_multi])
+def test_noise_single_attaches_by_appearance():
+    rows = block(0, 8, f0=0) + block(1, 8, f0=8)
+    rows.append((near(1, 0.4, 99), True, 16, [100.0, 400.0, 40.0, 80.0]))
+    lab, k, n_noise, _ = run_split(rows)
     assert k == 2
-    id1_frag = lab[8]
-    assert lab[-2] == id1_frag and lab[-1] == id1_frag   # both attached to id-1
-    assert n_noise >= 2
+    assert lab[-1] == lab[8]             # appearance decides for single noise
 
 
 def test_zero_embedding_noise_deterministic():
-    rows = block(0, 8) + block(1, 8) + [(np.zeros(D, np.float32), True)]
-    lab1 = run_split(rows)[0]
-    lab2 = run_split(rows)[0]
-    assert np.array_equal(lab1, lab2)
-    assert lab1[-1] == min(lab1[:16])     # distance 1 to all -> lowest label
+    rows = block(0, 8, f0=0) + block(1, 8, f0=8)
+    rows.append((np.zeros(D, np.float32), True, 16, [100.0, 400.0, 40.0, 80.0]))
+    lab, k, _, _ = run_split(rows)
+    assert k == 2 and lab[-1] == min(lab[0], lab[8])   # lowest label tie rule
 
 
-def test_allmulti_fragment_dissolved_per_detection():
-    # id-0 clean cluster; id-1 cluster entirely multi-crop -> dissolved into
-    # the remaining (clean-holding) fragment, detection by detection
-    rows = block(0, 8, single=True) + block(1, 8, single=False)
-    lab, k, _, n_diss = run_split(rows)
-    assert n_diss == 1 and k == 1
-    assert set(lab) == {0}
+def test_ghost_attaches_by_time_not_appearance():
+    # fragment A singles at frames 0..7, fragment B singles at frames 20..27;
+    # the ghost sits at frame 8 (time-adjacent to A). Its embedding is zero by
+    # construction -- appearance CANNOT decide; time must place it with A.
+    rows = block(0, 8, f0=0) + block(1, 8, f0=20)
+    rows.append((np.zeros(D, np.float32), False, 8, [100.0, 400.0, 40.0, 80.0]))
+    lab, k, _, n_ghosts = run_split(rows)
+    assert k == 2 and n_ghosts == 1
+    assert lab[-1] == lab[0]
 
 
-def test_allmulti_everywhere_kept():
-    # no clean detection anywhere: nothing to dissolve into -> fragments kept
-    rows = block(0, 8, single=False) + block(1, 8, single=False)
-    lab, k, _, n_diss = run_split(rows)
-    assert k == 2 and n_diss == 0
+def test_ghost_time_tie_breaks_on_space():
+    # equal time gap to both fragments (frame 10 between singles at 8 and 12):
+    # the spatially closer boundary single decides.
+    rows = block(0, 8, f0=1, x=100.0) + block(1, 8, f0=12, x=800.0)
+    # ghost at frame 10, dt=2 to A's last (frame 8) and to B's first (frame 12);
+    # box centre near B's x -> B wins.
+    rows.append((np.zeros(D, np.float32), False, 10, [795.0, 400.0, 40.0, 80.0]))
+    lab, k, _, _ = run_split(rows)
+    assert k == 2 and lab[-1] == lab[8]
 
 
-def test_centroids_clean_only_drive_attachment():
-    # id-0 fragment: clean members at identity 0 plus multi members at identity 2
-    # (which would drag an all-rows centroid away). A noise point midway is
-    # closer to the CLEAN centroid of fragment A than to fragment B's.
-    a = block(0, 6, single=True) + block(2, 4, single=False)
-    b = block(1, 8, single=True)
-    v = unit(0) * 0.8 + unit(1) * 0.35
-    noise = ((v / np.linalg.norm(v)).astype(np.float32), True)
-    lab, k, _, _ = run_split(a + b + [noise])
-    if k == 2:                             # DBSCAN grouping as constructed
-        assert lab[-1] == lab[0]           # attached via the clean centroid
+def test_mixed_tracklet_every_fragment_has_single():
+    rows = block(0, 8, f0=0) + block(1, 8, f0=8) \
+        + block(2, 5, single=False, f0=16)
+    lab, k, _, _ = run_split(rows)
+    single = np.array([r[1] for r in rows])
+    for c in set(lab):
+        assert single[lab == c].any()
+
+
+def test_split_tracklet_rejects_all_multi():
+    rows = block(0, 6, single=False)
+    try:
+        run_split(rows)
+    except ValueError:
+        return
+    raise AssertionError("all-multi tracklet must be rejected at tracklet level")
+
+
+# ------------------------------------------------------------- split_video --
+
+def vid(*tracklets):
+    """tracklets: list of (tid, rows) with rows = (e, single, frame, box)."""
+    rows = [(t, *r) for t, rs in tracklets for r in rs]
+    tids = np.array([r[0] for r in rows])
+    E = np.stack([r[1] for r in rows])
+    single = np.array([r[2] for r in rows])
+    frames = np.array([r[3] for r in rows])
+    boxes = np.array([r[4] for r in rows])
+    return E, single, frames, tids, boxes
 
 
 def test_split_video_invariant_and_frag_ids():
-    E, single, frames, tids = [], [], [], []
-    for f in range(12):
-        E.append(near(0, seed=f)); single.append(True); frames.append(f); tids.append(4)
-    for f in range(12):
-        E.append(near(1, seed=50 + f)); single.append(True); frames.append(f); tids.append(7)
-    frag, per = split_video(np.stack(E), np.array(single), np.array(frames),
-                            np.array(tids), EPS, MINS)
-    assert set(frag[:12]) == {4 * FRAG_BASE} and set(frag[12:]) == {7 * FRAG_BASE}
-    assert [p["track_id"] for p in per] == [4, 7]
-    assert all(p["k"] == 1 for p in per)
-    # source tracklet recoverable
-    assert all(int(f) // FRAG_BASE in (4, 7) for f in frag)
+    E, single, frames, tids, boxes = vid(
+        (3, block(0, 8, f0=0) + block(1, 8, f0=8)),
+        (7, block(2, 6, f0=0)))
+    frag, per, vrep = split_video(E, single, frames, tids, boxes, EPS, MINS)
+    assert set(frag // FRAG_BASE) == {3, 7}
+    assert len(set(frag[:16])) == 2 and len(set(frag[16:])) == 1
+    assert vrep["rows_cross_assigned"] == 0 and vrep["allmulti_kept"] == 0
+    ks = {p["track_id"]: p["k"] for p in per}
+    assert ks == {3: 2, 7: 1}
 
 
 def test_split_video_rejects_duplicate_frame():
-    E = np.stack([near(0, seed=k) for k in range(4)])
-    single = np.array([True] * 4)
-    frames = np.array([0, 1, 1, 2])
-    tids = np.array([3, 3, 3, 3])
+    E, single, frames, tids, boxes = vid((3, block(0, 4, f0=0)))
+    frames = frames.copy()
+    frames[1] = frames[0]
     try:
-        split_video(E, single, frames, tids, EPS, MINS)
-        raise AssertionError("duplicate (tracklet, frame) must raise")
+        split_video(E, single, frames, tids, boxes, EPS, MINS)
     except ValueError:
-        pass
+        return
+    raise AssertionError("duplicate (tracklet, frame) must raise")
 
 
-def test_no_cross_tracklet_mixing_and_determinism():
-    rng = np.random.RandomState(7)
-    E, single, frames, tids = [], [], [], []
-    for tid, ident in ((1, 0), (2, 1), (3, 2)):
-        for f in range(10):
-            E.append(near(ident, seed=rng.randint(10000)))
-            single.append(bool(rng.rand() > 0.3))
-            frames.append(f)
-            tids.append(tid)
-    args = (np.stack(E), np.array(single), np.array(frames), np.array(tids), EPS, MINS)
-    f1, _ = split_video(*args)
-    f2, _ = split_video(*args)
-    assert np.array_equal(f1, f2)
-    for i, t in enumerate(tids):
-        assert int(f1[i]) // FRAG_BASE == t     # fragments never cross tracklets
+def test_allmulti_tracklet_dissolved_across_video_by_space():
+    # tracklet 9 is all-multi at x ~ 800; tracklet 3 splits into a fragment at
+    # x 100 and one at x 800. Every row of 9 must join the x-800 fragment of 3.
+    E, single, frames, tids, boxes = vid(
+        (3, block(0, 8, f0=0, x=100.0) + block(1, 8, f0=8, x=800.0)),
+        (9, block(5, 4, single=False, f0=4, x=805.0)))
+    frag, per, vrep = split_video(E, single, frames, tids, boxes, EPS, MINS)
+    assert vrep["allmulti_tracklets"] == [9]
+    assert vrep["rows_cross_assigned"] == 4 and vrep["allmulti_kept"] == 0
+    target = frag[8]                     # the x-800 fragment of tracklet 3
+    assert all(frag[16 + i] == target for i in range(4))
+    p9 = next(p for p in per if p["track_id"] == 9)
+    assert p9["allmulti"] and p9["k"] == 0
 
 
-def _all_tests():
-    g = dict(globals())
-    names = sorted(n for n in g if n.startswith("test_"))
-    for n in names:
-        g[n]()
-        print(f"  ok {n}")
-    print(f"test_tracklet_split: {len(names)} tests passed")
+def test_allmulti_everywhere_kept():
+    E, single, frames, tids, boxes = vid(
+        (4, block(0, 6, single=False, f0=0)),
+        (5, block(1, 6, single=False, f0=0)))
+    frag, per, vrep = split_video(E, single, frames, tids, boxes, EPS, MINS)
+    assert vrep["allmulti_kept"] == 2 and vrep["rows_cross_assigned"] == 0
+    assert set(frag[:6]) == {4 * FRAG_BASE} and set(frag[6:]) == {5 * FRAG_BASE}
+
+
+def test_single_rows_never_cross_tracklets_and_determinism():
+    E, single, frames, tids, boxes = vid(
+        (3, block(0, 8, f0=0) + block(1, 8, f0=8)),
+        (7, block(2, 6, f0=0) + block(3, 3, single=False, f0=6)),
+        (9, block(5, 4, single=False, f0=4, x=805.0)))
+    frag1, _, _ = split_video(E, single, frames, tids, boxes, EPS, MINS)
+    frag2, _, _ = split_video(E, single, frames, tids, boxes, EPS, MINS)
+    assert (frag1 == frag2).all()
+    for f in np.unique(frag1):
+        sel = (frag1 == f) & single
+        assert len(set(tids[sel])) <= 1  # a fragment's singles: one tracklet
 
 
 if __name__ == "__main__":
-    _all_tests()
+    import sys
+    mod = sys.modules[__name__]
+    names = [n for n in dir(mod) if n.startswith("test_")]
+    for n in names:
+        getattr(mod, n)()
+        print(f"ok {n}")
+    print(f"{len(names)} tests passed")

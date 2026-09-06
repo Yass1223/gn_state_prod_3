@@ -13,7 +13,9 @@
 # configured, NO merge threshold anywhere, inputs it received - clean/overlapping
 # labels, zero embeddings -, per-tracklet split counts consistent with each other
 # and with the detections, output invariants: every tracked row stays assigned,
-# one detection per frame per fragment, every fragment from exactly one source
+# one detection per frame per fragment among SINGLE rows, multi-row collisions
+# and cross-tracklet fragments only from dissolved all-multi tracklets, every
+# fragment's single rows from exactly one source
 # tracklet), crop_filter (labels on every detection,
 # labels consistent with the stored ratios at the configured thresholds, every
 # multi label has a trigger box, vetoes by boxes later left
@@ -22,18 +24,25 @@
 # configured, mean position and off-pitch rule recomputed from bbox_pitch vs the
 # stored columns, track_id cleared on off-pitch tracklets iff the gate is enabled,
 # counts vs sidecar; the tracklet_split / crop_filter / calibration checks use the
-# pre-gate ids in track_id_pregate), team_embed (embedding on every tracklet, sidecar: checkpoint digest that
-# ran vs configured, empty/zero embeddings, off-grid tracklets), role_team (valid
-# role on every tracked row, team on every player/keeper, none on referees,
-# per-track constancy, sidecar: parameters that ran vs configured, referee cap,
-# tracklets that reached the rules without an embedding), jersey_number_detect
+# pre-gate ids in track_id_pregate), team_embed (descriptor coverage via
+# team_cluster_nearest -- team_embedding itself is dropped by traj_refine after the
+# merge -- sidecar: checkpoint digest that ran vs configured, empty/zero
+# embeddings, off-grid tracklets, clustering counts; with kmeans2_nearest every
+# embedded fragment is clustered), role_team (valid role on
+# every tracked SINGLE row, none on multi rows -- labels are applied to single
+# crops only -- team on every single player/keeper row, none on referees,
+# per-track constancy over single rows,
+# sidecar: parameters that ran vs configured, referee/assistant/keeper
+# caps, outlier group vs the per-trajectory flags, half-fallback count -- the
+# stage recomputes appearance from clean crops), jersey_number_detect
 # (cache blob: rule vote_pool, sha256 of BOTH checkpoints vs the staged files,
 # every eligible tracklet answered, detection columns consistent with the blob,
 # provisioning provenance of SATRN and PARSeq), traj_refine (snapshots present,
 # sidecar: settings and embedder digest that ran vs configured and vs
 # tracklet_split's pin, row accounting out == in - stage-3b unassigned,
-# tracklets_out == tracklets_in -
-# merges, merge distances <= tau, no frame collision, number/team/role constant
+# tracklets_out == tracklets_in - merges (merges = S1 + S2 + final),
+# S2/final merge distances <= tau (S1 is label-driven, no threshold),
+# no frame collision, number/team_cluster constant
 # per refined track, disabled => untouched; the team_embed / role_team / jersey
 # checks use the pre-refine ids in track_id_prerefine and the jersey snapshot
 # columns), tracklet_agg (jersey_number), and
@@ -119,6 +128,7 @@ cfg:
     enabled: ${modules.traj_refine.cfg.enabled}
     tau: ${modules.traj_refine.cfg.tau}
     use_reenter: ${modules.traj_refine.cfg.use_reenter}
+    edge_margin: ${modules.traj_refine.cfg.edge_margin}
     ain_sha256: ${modules.traj_refine.cfg.ain_sha256}
     ain_sha256_tracklet_split: ${modules.tracklet_split.cfg.ain_sha256}
 

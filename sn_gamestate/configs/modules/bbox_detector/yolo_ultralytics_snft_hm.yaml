@@ -1,13 +1,13 @@
 # YOLO11-L "HM" fine-tune (single-class person), weights fetched from Hugging Face —
-# the DEFAULT detector (soccernet.yaml defaults group). Same stage module and
-# identical inference operating point as yolo_ultralytics_snft.yaml (imgsz 1280,
-# conf floor 0.1 kept with `>=`, iou 0.7, max_det 300, RGB->BGR fix, fp16 on CUDA),
-# so a run under this config differs from the frozen-baseline detector ONLY in the
-# detector weights.
+# the ALTERNATIVE detector. Same stage module and identical inference operating point
+# as yolo_ultralytics_snft.yaml (imgsz 1280, conf floor 0.1 kept with `>=`, iou 0.7,
+# max_det 300, RGB->BGR fix, fp16 on CUDA), so a run under this config differs from
+# the default ONLY in the detector weights.
 #
-# Select the frozen-baseline detector per run instead (Hydra defaults group):
+# Select per run (Hydra defaults group; the default in soccernet.yaml stays the
+# frozen-baseline detector):
 #
-#   tracklab -cn soccernet modules/bbox_detector=yolo_ultralytics_snft
+#   tracklab -cn soccernet modules/bbox_detector=yolo_ultralytics_snft_hm
 #
 # Weights: HF Ynniss/YOLOv11L_HM `best.zip` — the .zip IS the torch checkpoint (a
 # torch.save zip archive with its members under one prefix, the same publication

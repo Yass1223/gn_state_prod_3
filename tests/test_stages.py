@@ -8,6 +8,7 @@
 * crop_filter -> team_embed -> role_team, then the column contract the GS encoder
   and the audit rely on.
 """
+import json
 import os
 import sys
 import tempfile
@@ -160,21 +161,40 @@ def test_stages():
     assert np.allclose(ref, got, atol=1e-6), "embedding differs from the notebook's embed_osnet"
     print("team_embed: letterbox + flip TTA == notebook embed_osnet")
 
-    rt = RoleTeamAssignment(SimpleNamespace(params=dict(rules.FROZEN_PARAMS), audit_dir=str(tmp / "audit_role"),
-                                            pos_stride=5, crops_per_track=16))
+    # role_team recomputes appearance itself from clean crops (same checkpoint
+    # coordinates as team_embed); traj_refine would have dropped team_embedding
+    # by this point, so clear it here to mirror the pipeline state. The jersey
+    # column exists by then too (jersey runs before traj_refine): none here.
+    det["team_embedding"] = None
+    det["jersey_number_detection"] = None
+    rt = RoleTeamAssignment(SimpleNamespace(team_local_path=str(ckpt), team_sha256=None, team_repo="x",
+                                            team_file="y", team_revision=None,
+                                            params=None, audit_dir=str(tmp / "audit_role"),
+                                            pos_stride=5, crops_per_track=16, batch_size=32),
+                            device="cpu")
     det = rt.process(det, meta)
     tracked = det.dropna(subset=["track_id"])
-    assert tracked["role"].isin(["player", "goalkeeper", "referee"]).all(), "every tracked row needs a role"
+    t_single = tracked[tracked["crop_single"].astype(bool)]
+    t_multi = tracked[~tracked["crop_single"].astype(bool)]
+    assert t_single["role"].isin(["player", "goalkeeper", "referee"]).all(), \
+        "every tracked SINGLE row needs a role"
+    assert t_multi["role"].isna().all() and t_multi["team"].isna().all(), \
+        "multi rows receive no role/team (labels on single crops only)"
     assert det.loc[det.track_id.isna(), "role"].isna().all()
-    pg = tracked[tracked.role != "referee"]
+    pg = t_single[t_single.role != "referee"]
     assert pg["team"].isin(["left", "right"]).all()
-    assert tracked.loc[tracked.role == "referee", "team"].isna().all()
-    for tid, g in tracked.groupby("track_id"):
+    assert t_single.loc[t_single.role == "referee", "team"].isna().all()
+    for tid, g in t_single.groupby("track_id"):
         assert g["role"].nunique() == 1 and g["team"].astype(str).nunique() == 1
-    print("role_team:", tracked.groupby("track_id")[["role", "team"]].first().to_dict("index"))
-    rec = (tmp / "audit_role" / "SNGS-000.json").read_text()
-    assert '"per_trajectory"' in rec and '"cues"' in rec
-    print("role_team: contract ok, sidecar written")
+    print("role_team:", t_single.groupby("track_id")[["role", "team"]].first().to_dict("index"))
+    rec = json.loads((tmp / "audit_role" / "SNGS-000.json").read_text())
+    assert rec["per_trajectory"] and "cues" in rec["sequence_level"]
+    lvl = rec["sequence_level"]
+    flagged = sorted(float(r["track_id"]) for r in rec["per_trajectory"] if r["outlier"])
+    assert sorted(map(float, lvl["outlier_group"])) == flagged, "outlier group != per-trajectory flags"
+    assert lvl["n_outlier"] == len(lvl["outlier_group"])
+    assert "sha256" in (rec["embedder"] or {}), "role_team sidecar must record the embedder digest"
+    print("role_team: contract ok (outlier group consistent), sidecar written")
 
 
 @torch.no_grad()

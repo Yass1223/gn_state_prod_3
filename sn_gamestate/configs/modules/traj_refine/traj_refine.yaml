@@ -1,23 +1,36 @@
 # Label-aware trajectory refinement, run between `jersey_number_detect` and
-# `role_team`: it consumes evidence that does not exist at tracklet_split's
-# position in the pipeline -- the team CLUSTER id (team_embed), the jersey
-# number with its pooled maxconf candidate statistics (jn_gsr_api), and
-# exit/entry geometry. Roles and team sides do not exist yet; they are
+# `role_team`: the pipeline's ONE merge, on evidence that does not exist at
+# tracklet_split's position -- the TEAM CLUSTER id (team_embed), the
+# jersey number with its pooled maxconf candidate statistics (jn_gsr_api), and
+# exit/entry geometry. Roles and team sides do NOT exist yet: they are
 # assigned after this stage, on the finished trajectories.
 #
-# Method (sn_gamestate/refine/traj_refine.py): five phases of ONE identical
-# agglomerative procedure (average linkage, the splitter's distance
-# convention; minimum-distance pair merges while distance <= tau, under
-# clean-frame disjointness, re-enter consistency and vacuous-when-unknown
-# label agreement: cluster ids must agree when both are known, numbers must
-# agree when both are known). Fragments are pooled by the labels they arrive
-# with -- S1 cluster+number, S2 cluster only, S3 number only, S4 neither --
-# and phases 1-4 merge each pool in isolation; phase 5 pools every cluster,
-# merged or not, and runs the procedure once more. In phases 1, 3 and 5
-# (where same-number pairs are examined) two fragments claiming one number at
-# the SAME time are a conflict, resolved by reassigning the lower-maxconf
-# side to its best remaining jersey candidate (or leaving it unnumbered), to
-# a fixpoint before each agglomerative pass.
+# GHOST RULE: multi-crop detections enter no merge condition -- no centroid
+# (centroids are means over CLEAN detections only, no fallback), no re-enter
+# anchor, no disjointness test. They follow their fragment through every
+# merge; the one exception is stage 3 (final-trajectory duplicate resolution),
+# which places them by appearance, no-overlap, with dynamic centroids.
+#
+# Method (sn_gamestate/refine/traj_refine.py): THREE PHASES over a partition
+# of the fragments by label knowledge -- S1: cluster AND number known; S2:
+# cluster known, number unknown; a fragment with NO cluster id never merges.
+# Phase S1 merges trajectory pairs with EQUAL cluster and EQUAL number, in
+# descending order of the pair's joint maxconf score, when their clean frame
+# sets are disjoint and their exit/entry sides are consistent -- NO distance
+# threshold (the two labels together already identify one player); a pair
+# claiming one number at the SAME time is a conflict, resolved by reassigning
+# the lower-maxconf side to its best remaining jersey candidate (an unnumbered
+# loser leaves S1 and joins S2). Phase S2 merges agglomeratively (average
+# linkage) within S2 under equal cluster, clean-frame disjointness and
+# re-enter, distance <= tau. The FINAL phase pools ALL S1 and S2 survivors,
+# merged and unmerged alike, and merges agglomeratively under clean-frame
+# disjointness, re-enter, the SAME cluster id and no contradicting numbers
+# (two different known numbers never merge), distance <= tau.
+# EVERY fragment is in scope (there is no role to exempt anyone). After the
+# merge the fragment-level team embeddings are dropped: trajectories carry the
+# jersey evidence only (team_embedding cleared; team_cluster /
+# team_cluster_nearest kept as inert snapshots), and the role_team stage
+# recomputes appearance from clean crops.
 #
 # The incoming ids and jersey columns are snapshotted per row
 # (track_id_prerefine, jersey_number_detection_prerefine,
@@ -48,24 +61,28 @@ cfg:
   enabled: true
 
   # Merge acceptance threshold on the appearance distance (1 - dot of mean unit
-  # vectors over clean detections), the SAME in all five phases. The pipeline's
-  # ONLY merge threshold (the splitter never merges). 0.60 is inherited from the
-  # retired split_merge stage's notebook-validated operating point; NOT re-tuned
-  # for this stage on any validation split yet.
+  # vectors over clean detections), phases S2 and FINAL (phase S1 is
+  # label-driven and carries no threshold). The pipeline's ONLY merge
+  # threshold (the splitter never merges). 0.60 is inherited from the retired
+  # split_merge stage's notebook-validated operating point; NOT re-tuned for
+  # this stage on any validation split yet.
   tau: 0.60
 
-  # Re-enter condition (C3): when one trajectory ends before the other begins,
-  # the frame HALF (whole-frame-width rule, no margin) of the earlier
-  # trajectory's last box and the later trajectory's first box must match.
+  # Re-enter condition (C3): when one trajectory ends before the other begins
+  # and both boundary boxes touch a lateral image edge, the sides must match.
+  # edge_margin is the touch tolerance as a fraction of the image width
+  # (0.02 = ~38 px at 1920); not tuned on any validation split yet.
   use_reenter: true
+  edge_margin: 0.02
 
   # Scope: EVERY fragment. Roles do not exist at this point (role_team runs
   # after this stage), so there is no exemption; the merge conditions are the
-  # team cluster (team_embed) and the jersey number, each applying only when
-  # both sides know it.
+  # team cluster (team_embed, REQUIRED -- an unclustered fragment never
+  # merges) and the jersey number.
 
   batch_size: 64      # crops per appearance forward pass
 
-  # Per-sequence sidecar (settings, embedder digest, merge and conflict log of
-  # the five phases, per-cluster breakdown) read by the `audit` stage.
+  # Per-sequence sidecar (settings, embedder digest, partition counts,
+  # merge/conflict/rejection log of the three phases, per-cluster breakdown)
+  # read by the `audit` stage.
   audit_dir: ${project_dir}/audit/traj_refine

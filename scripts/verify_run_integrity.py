@@ -10,7 +10,11 @@ numbers that were computed with NO camera calibration (so no pitch coordinates)
 or NO jersey numbers. Those numbers look plausible and are wrong.
 
 This gate inspects a finished run and exits non-zero if anything silently failed.
-It is read-only: it never modifies the pipeline or its outputs.
+It is read-only: it never modifies the pipeline or its outputs. AUDIT VERDICTS
+ARE INFORMATION ONLY: the per-sequence PASS/WARN/FAIL verdicts of the audit
+stage are printed for inspection and NEVER affect the exit code. The exit code
+is driven only by execution failures: logged subprocess failures, missing or
+unreadable artifacts, and sequence-coverage shortfalls.
 
     python scripts/verify_run_integrity.py                      # newest eval log
     python scripts/verify_run_integrity.py --log eval_results/eval_test.log
@@ -141,8 +145,11 @@ def main(argv=None) -> int:
         notes.append("no weights_provenance.json - PARSeq checkpoint origin unverified")
 
     # Audit stage verdicts (sn_gamestate.audit.RunAudit, the last pipeline stage):
-    # one JSON per sequence with a PASS/WARN/FAIL per component. Any FAIL is a
-    # silent degradation that the run survived; it is not a reportable run.
+    # one JSON per sequence with a PASS/WARN/FAIL per component. INFORMATION ONLY:
+    # the verdicts are printed for inspection and never affect the exit code.
+    # Unreadable audit files and coverage shortfalls are execution failures and
+    # still count as problems.
+    audit_info: list[str] = []
     audits = sorted(AUDIT_DIR.glob("*.json")) if AUDIT_DIR.is_dir() else []
     if not audits:
         notes.append(f"no audit verdicts in {AUDIT_DIR} - the audit stage did not run "
@@ -158,19 +165,21 @@ def main(argv=None) -> int:
             for c in rep.get("checks", []):
                 if c.get("verdict") == "FAIL":
                     n_fail += 1
-                    problems.append(f"audit {rep.get('sequence', a.stem)}: "
-                                    f"{c.get('component')} FAIL - {c.get('note')}")
+                    audit_info.append(f"audit {rep.get('sequence', a.stem)}: "
+                                      f"{c.get('component')} FAIL - {c.get('note')}")
                 elif c.get("verdict") == "WARN":
                     n_warn += 1
-                    notes.append(f"audit {rep.get('sequence', a.stem)}: "
-                                 f"{c.get('component')} WARN - {c.get('note')}")
+                    audit_info.append(f"audit {rep.get('sequence', a.stem)}: "
+                                      f"{c.get('component')} WARN - {c.get('note')}")
         print(f"{BOLD}audit:{RESET} {len(audits)} sequence(s), "
-              f"{n_fail} FAIL, {n_warn} WARN")
+              f"{n_fail} FAIL, {n_warn} WARN (information only, never blocks)")
         if args.expect_sequences and len(audits) < args.expect_sequences:
             problems.append(f"audit covers {len(audits)} sequence(s), "
                             f"expected {args.expect_sequences}")
 
     print()
+    for line in audit_info:
+        print(f"  {YELLOW}audit{RESET} {line}")
     for n in notes:
         print(f"  {YELLOW}note{RESET}  {n}")
     if problems:

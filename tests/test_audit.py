@@ -23,8 +23,8 @@ assert det["track_id"].equals(det["track_id_pregate"]) and not det["pitch_gate_o
 te = TeamEmbedding(SimpleNamespace(team_local_path=str(ckpt), team_sha256=None, team_repo="x", team_file="y", team_revision=None,
                                    audit_dir=str(tmp / "audit/team_embed"), pos_stride=5, crops_per_track=16, batch_size=32), device="cpu")
 det = te.process(det, meta)
-det = RoleTeamAssignment(SimpleNamespace(params=dict(rules.FROZEN_PARAMS), audit_dir=str(tmp / "audit/role_team"), pos_stride=5, crops_per_track=16)).process(det, meta)
 det["jersey_number_detection"] = None; det["jersey_number_confidence"] = 0.0; det["jersey_number"] = np.nan
+det = RoleTeamAssignment(SimpleNamespace(params=dict(rules.FROZEN_PARAMS), audit_dir=str(tmp / "audit/role_team"), pos_stride=5, crops_per_track=16)).process(det, meta)
 cfg = SimpleNamespace(out_dir=str(tmp / "audit"), jn_cache_dir=str(tmp / "jn"), calib_dir=str(tmp / "calib"), models_dir=str(tmp / "models"),
                       thresholds={}, track_sidecar_dir=None, expected_tracker={},
                       expected_crop_filter=dict(thr_target=0.25, thr_other=0.40, contam_mode="tracked"),

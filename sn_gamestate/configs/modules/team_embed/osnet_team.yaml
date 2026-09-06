@@ -1,12 +1,19 @@
 # Team-appearance embeddings (osnet_team) of <= 16 SINGLE crops per fragment,
 # sampled on the stride-5 frame grid, plus the sequence's TEAM CLUSTERING:
 # fragment descriptor = L2-normalised median of its embedded single crops;
-# 2-means over the descriptors; the robust distance rule (d > median + outlier_k
-# * MAD to the nearest centroid, active when the spread is meaningful) leaves
-# kit outliers -- referees, odd kits -- UNCLUSTERED (team_cluster NaN).
-# team_cluster_nearest records every embedded fragment's nearest centroid before
-# the threshold: the post-refine role_team stage's fallback for unclustered
-# players. No left/right naming and no roles here -- those are assigned after
+# 2-means over the descriptors. With the default method (kmeans2_nearest)
+# EVERY embedded fragment takes its nearest centroid as its team cluster --
+# no outlier threshold, so the traj_refine merge downstream can require
+# cluster equality on every fragment that has a descriptor; only a fragment
+# without any embedded single crop stays unclustered (team_cluster NaN).
+# The comparison method kmeans2_threshold additionally applies the robust
+# distance rule (d > median + outlier_k * MAD to the nearest centroid, active
+# when the spread is meaningful) and leaves kit outliers UNCLUSTERED.
+# team_cluster_nearest records every embedded fragment's nearest centroid:
+# an inert diagnostic snapshot (the run audit's per-fragment
+# coverage carrier; team_embedding itself is dropped by traj_refine after the
+# merge, and the post-refine role_team stage recomputes appearance from clean
+# crops). No left/right naming and no roles here -- those are assigned after
 # traj_refine. Runs after tracklet_split, before jersey_number_detect.
 #
 # Checkpoint: Ynniss/osnet_team / osnet_team_best.pt — the notebook's model
@@ -28,7 +35,8 @@ cfg:
   crops_per_track: 16       # crops embedded per tracklet (notebook CROPS_PER_TRK)
   batch_size: 128           # crops per forward pass
   # Team clustering (config switch so alternative methods can be compared):
-  #   kmeans2_threshold  2-means + robust distance threshold (the default)
-  cluster_method: kmeans2_threshold
-  outlier_k: 3.25           # unclustered when d > median + outlier_k * MAD (notebook's k)
+  #   kmeans2_nearest    2-means, every embedded fragment -> nearest centroid (the default)
+  #   kmeans2_threshold  2-means + robust distance threshold (comparison method)
+  cluster_method: kmeans2_nearest
+  outlier_k: 3.25           # kmeans2_threshold only: unclustered when d > median + outlier_k * MAD (inert under kmeans2_nearest, recorded either way)
   audit_dir: ${project_dir}/audit/team_embed

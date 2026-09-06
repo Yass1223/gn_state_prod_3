@@ -15,8 +15,10 @@ was observed, and a verdict:
     INFO   observation only (no independent expectation can be checked here)
 
 It never modifies detections. Per sequence it writes ``<out_dir>/<seq>.json``
-and logs a table. ``scripts/verify_run_integrity.py`` reads those files and
-refuses the run's metrics on any FAIL.
+and logs a table. The verdicts are INFORMATION for inspection: nothing blocks
+on them. ``scripts/verify_run_integrity.py`` reads those files and reports the
+verdicts; its exit code is driven only by execution failures (missing
+artifacts, logged subprocess failures), never by audit verdicts.
 
 Thresholds live in the module config (``modules/audit/run_audit.yaml``) with
 the reason for each; the JSON keeps the raw counts so they can be revisited.
@@ -451,18 +453,26 @@ class RunAudit(VideoLevelModule):
         The stage is Stage 1 of the refinement method and SPLIT ONLY: the
         pipeline's one merge is ``traj_refine``, so any merging evidence here
         (a merge threshold in the settings, merge or pass sections in the
-        sidecar, dropped rows) is a FAIL. ``tracked`` must hold the track ids
-        as the splitter LEFT them: the traj_refine stage relabels afterwards
-        and keeps them per row, so ``process`` rebuilds this frame from
-        ``track_id_prerefine``."""
-        c = Check("tracklet_split (DBSCAN split, no merging)",
+        sidecar, dropped rows) is a FAIL. The split runs over SINGLE
+        detections only; multi detections are unembedded ghosts attached by
+        time/space, and a dissolved all-multi tracklet's rows are the ONE
+        legal source of cross-tracklet fragments and of frame collisions --
+        always multi rows, counted in the sidecar. ``tracked`` must hold the
+        track ids as the splitter LEFT them: the traj_refine stage relabels
+        afterwards and keeps them per row, so ``process`` rebuilds this frame
+        from ``track_id_prerefine``."""
+        c = Check("tracklet_split (single-only DBSCAN split + ghost attachment, no merging)",
                   "sidecar for the sequence; settings (eps, min_samples) and checkpoint "
                   "that ran equal the configured ones; NO merge threshold anywhere; "
-                  "crop_single received; per-tracklet fragment counts sum to the "
-                  "fragment total; every tracked row stays assigned; fragments equal "
-                  "the trajectories in the state; one detection per frame per "
-                  "fragment; every fragment has exactly one source tracklet "
-                  "(track_id_presplit)")
+                  "crop_single received; per-tracklet fragment counts + kept all-multi "
+                  "tracklets sum to the fragment total; every tracked row stays "
+                  "assigned; fragments equal the trajectories in the state; one "
+                  "detection per frame per fragment among SINGLE rows, multi-row "
+                  "collisions and cross-tracklet fragments only from dissolved "
+                  "all-multi tracklets (bounded by rows_cross_assigned); every "
+                  "fragment's single rows from exactly one source tracklet "
+                  "(track_id_presplit); every fragment holds a single detection "
+                  "except the kept all-multi degenerates")
         exp = self.expected_tracklet_split
         c.observed["expected"] = dict(exp)
         data = self._read_sidecar(self.tracklet_split_sidecar_dir, seq)
@@ -533,24 +543,42 @@ class RunAudit(VideoLevelModule):
         n_trk_in = int(inp.get("tracklets") or 0)
         n_frag = int(sp.get("fragments") or 0)
         per = sp.get("per_tracklet") or []
-        if n_frag < n_trk_in:
-            c.set(FAIL, f"{n_frag} fragments from {n_trk_in} tracklets (the split can "
-                        f"only add)")
-        if per and sum(int(p.get("k") or 0) for p in per) != n_frag:
-            c.set(FAIL, "the per-tracklet fragment counts do not sum to the fragment "
-                        "total")
+        n_kept = int(sp.get("allmulti_kept") or 0)
+        n_dissolved = int(sp.get("allmulti_dissolved") or 0)
+        n_cross = int(sp.get("rows_cross_assigned") or 0)
+        if n_frag < n_trk_in - n_dissolved:
+            c.set(FAIL, f"{n_frag} fragments from {n_trk_in} tracklets with "
+                        f"{n_dissolved} dissolved all-multi tracklet(s) (the split "
+                        f"can only add)")
+        if per and sum(int(p.get("k") or 0) for p in per) + n_kept != n_frag:
+            c.set(FAIL, "the per-tracklet fragment counts + kept all-multi "
+                        "tracklets do not sum to the fragment total")
+        if len(sp.get("allmulti_tracklets") or []) != n_dissolved + n_kept:
+            c.set(FAIL, "allmulti_tracklets disagrees with allmulti_dissolved + "
+                        "allmulti_kept")
+        if n_kept and n_dissolved:
+            c.set(FAIL, "all-multi tracklets both dissolved and kept: kept is the "
+                        "no-fragment-anywhere degenerate only")
         if int(outp.get("fragments") or 0) != n_frag:
             c.set(FAIL, f"outputs.fragments ({outp.get('fragments')}) != "
                         f"split.fragments ({n_frag})")
         if int(outp.get("rows_assigned") or 0) != n_in:
             c.set(FAIL, f"rows_assigned ({outp.get('rows_assigned')}) != tracked input "
                         f"({n_in}); the splitter keeps every row")
-        if int(outp.get("frame_collisions") or 0):
-            c.set(FAIL, f"the stage reported {outp.get('frame_collisions')} frame "
-                        f"collision(s) in its output")
-        if int(outp.get("fragments_multi_origin") or 0):
-            c.set(FAIL, f"{outp.get('fragments_multi_origin')} fragment(s) mix "
-                        f"detections from more than one source tracklet")
+        if int(outp.get("single_frame_collisions") or 0):
+            c.set(FAIL, f"the stage reported {outp.get('single_frame_collisions')} "
+                        f"frame collision(s) among SINGLE rows; fragments partition "
+                        f"the tracklets' single detections")
+        if int(outp.get("multi_frame_collisions") or 0) > n_cross:
+            c.set(FAIL, f"{outp.get('multi_frame_collisions')} multi-row frame "
+                        f"collision(s) exceed the {n_cross} cross-assigned row(s); "
+                        f"a within-tracklet ghost collided, which cannot happen")
+        if int(outp.get("fragments_multi_origin_single") or 0):
+            c.set(FAIL, f"{outp.get('fragments_multi_origin_single')} fragment(s) mix "
+                        f"SINGLE detections from more than one source tracklet")
+        if int(outp.get("fragments_with_cross_rows") or 0) and not n_cross:
+            c.set(FAIL, "fragments hold cross-tracklet rows but nothing was "
+                        "cross-assigned")
 
         # --- outputs, recomputed from the detections the audit receives
         if "track_id" not in det.columns:
@@ -566,38 +594,59 @@ class RunAudit(VideoLevelModule):
             c.set(FAIL, f"{n_frag_now} trajectories in the state, the stage reports "
                         f"{n_frag} fragments")
         if n_tracked_now:
-            coll = int(tracked.duplicated(subset=["image_id", "track_id"]).sum())
-            c.observed["frame_collisions_recomputed"] = coll
-            if coll:
-                c.set(FAIL, f"{coll} (image_id, track_id) collision(s): two "
-                            f"detections of one fragment in one frame")
+            if "crop_single" not in tracked.columns:
+                c.set(FAIL, "crop_single column missing from the state")
+                return c
+            sing = tracked["crop_single"].astype(bool)
+            coll_s = int(tracked[sing].duplicated(subset=["image_id", "track_id"]).sum())
+            coll_all = int(tracked.duplicated(subset=["image_id", "track_id"]).sum())
+            c.observed["single_frame_collisions_recomputed"] = coll_s
+            c.observed["multi_frame_collisions_recomputed"] = coll_all - coll_s
+            if coll_s:
+                c.set(FAIL, f"{coll_s} (image_id, track_id) collision(s) among "
+                            f"SINGLE rows: two single detections of one fragment "
+                            f"in one frame")
+            if coll_all - coll_s > n_cross:
+                c.set(FAIL, f"{coll_all - coll_s} multi-row frame collision(s) "
+                            f"exceed the {n_cross} cross-assigned row(s)")
             if "track_id_presplit" in det.columns:
                 origin = tracked.join(det["track_id_presplit"], how="left") \
                     if "track_id_presplit" not in tracked.columns else tracked
+                per_origin_s = origin[sing].groupby("track_id")["track_id_presplit"].nunique()
+                n_mixed_s = int((per_origin_s > 1).sum())
                 per_origin = origin.groupby("track_id")["track_id_presplit"].nunique()
-                n_mixed = int((per_origin > 1).sum())
-                c.observed["fragments_multi_origin_recomputed"] = n_mixed
-                if n_mixed:
-                    c.set(FAIL, f"{n_mixed} fragment(s) hold detections from more "
-                                f"than one source tracklet")
+                n_cross_frag = int((per_origin > 1).sum())
+                c.observed["fragments_multi_origin_single_recomputed"] = n_mixed_s
+                c.observed["fragments_with_cross_rows_recomputed"] = n_cross_frag
+                if n_mixed_s:
+                    c.set(FAIL, f"{n_mixed_s} fragment(s) hold SINGLE detections "
+                                f"from more than one source tracklet")
+                if n_cross_frag != int(outp.get("fragments_with_cross_rows") or 0):
+                    c.set(FAIL, f"fragments with cross-tracklet rows: recomputed "
+                                f"{n_cross_frag}, sidecar "
+                                f"{outp.get('fragments_with_cross_rows')}")
             else:
                 c.set(FAIL, "track_id_presplit column missing from the state; the "
                             "splitter's origin snapshot did not survive")
-            if "crop_single" in tracked.columns:
-                has_clean = tracked.groupby("track_id")["crop_single"].apply(
-                    lambda s: bool(s.astype(bool).any()))
-                n_noclean = int((~has_clean).sum())
-                c.observed["fragments_without_clean_recomputed"] = n_noclean
-                if n_noclean != int(outp.get("fragments_without_clean") or 0):
-                    c.set(FAIL, f"fragments without a clean detection: recomputed "
-                                f"{n_noclean}, sidecar "
-                                f"{outp.get('fragments_without_clean')}")
-                lens = tracked.groupby("track_id").size()
-                c.observed["fragment_len_median"] = float(lens.median())
-                c.observed["fragment_len_min"] = int(lens.min())
-            else:
-                c.set(FAIL, "crop_single column missing from the state")
+            has_clean = tracked.groupby("track_id")["crop_single"].apply(
+                lambda s: bool(s.astype(bool).any()))
+            n_noclean = int((~has_clean).sum())
+            c.observed["fragments_without_clean_recomputed"] = n_noclean
+            if n_noclean != int(outp.get("fragments_without_clean") or 0):
+                c.set(FAIL, f"fragments without a clean detection: recomputed "
+                            f"{n_noclean}, sidecar "
+                            f"{outp.get('fragments_without_clean')}")
+            if n_noclean != n_kept:
+                c.set(FAIL, f"{n_noclean} fragment(s) without a single detection "
+                            f"but {n_kept} kept all-multi tracklet(s); every other "
+                            f"fragment must hold a single detection")
+            lens = tracked.groupby("track_id").size()
+            c.observed["fragment_len_median"] = float(lens.median())
+            c.observed["fragment_len_min"] = int(lens.min())
         c.observed["tracklets_split"] = sp.get("tracklets_split")
+        c.observed["ghosts_attached"] = sp.get("ghosts")
+        c.observed["allmulti"] = dict(dissolved=n_dissolved, kept=n_kept,
+                                      rows_cross_assigned=n_cross)
         return c
 
     # --------------------------------------------------- pitch gate stage --
@@ -973,14 +1022,18 @@ class RunAudit(VideoLevelModule):
         that ran equal to the configured ones and to tracklet_split's checkpoint pin;
         tracked rows out equal tracked rows in minus the stage-3b unassigned count
         (the only way this stage drops a row); tracklets
-        after == tracklets before - merges; every accepted merge distance <= tau;
-        no (image_id, track_id) collision; number/team_cluster constant per final
-        track; counts equal the sidecar's; disabled => everything untouched."""
-        c = Check("traj_refine (label-aware trajectory refinement)",
+        after == tracklets before - merges (merges = S1 + S2 + final);
+        every accepted S2/final merge distance <= tau (S1 merges are label-driven
+        and carry no threshold -- their distance is informational and may be
+        null); no (image_id, track_id) collision; number/team_cluster constant
+        per final track; counts equal the sidecar's; disabled => everything
+        untouched."""
+        c = Check("traj_refine (three-phase label-aware trajectory refinement)",
                   "track_id_prerefine + jersey snapshots on every row; sidecar with the "
                   "settings and checkpoint that ran equal to the configured ones and to "
                   "tracklet_split's pin; tracked rows out == in - unassigned; tracklets_out == "
-                  "tracklets_in - merges; merge distances <= tau; one detection per frame "
+                  "tracklets_in - merges; merges == S1 + S2 + final; S2/final merge "
+                  "distances <= tau (S1 has no threshold); one detection per frame "
                   "per trajectory; number/team_cluster constant per final track; "
                   "disabled => track_id and jersey columns untouched")
         exp = self.expected_traj_refine
@@ -1010,7 +1063,7 @@ class RunAudit(VideoLevelModule):
             c.set(FAIL, "enabled not declared (config) or not recorded (sidecar)")
         elif bool(want_enabled) != bool(ran_enabled):
             c.set(FAIL, f"enabled that ran ({ran_enabled}) != configured ({want_enabled})")
-        for key in ("tau",):
+        for key in ("tau", "edge_margin"):
             want, got = exp.get(key), st.get(key)
             if want is None or got is None:
                 c.set(FAIL, f"{key} not declared (config) or not recorded (sidecar)")
@@ -1077,11 +1130,19 @@ class RunAudit(VideoLevelModule):
         n_trk_pre = int(tracked_prerefine["track_id"].nunique()) if len(tracked_prerefine) else 0
         n_trk_now = int(tracked["track_id"].nunique()) if len(tracked) else 0
         n_merges = int(outp.get("merges") or 0)
+        n_s1 = int(outp.get("merges_s1") or 0)
+        n_s2 = int(outp.get("merges_s2") or 0)
+        n_fin = int(outp.get("merges_final") or 0)
         c.observed.update(tracklets_before=n_trk_pre, tracklets_after=n_trk_now,
-                          merges=n_merges, conflicts=outp.get("conflicts"),
-                          rejected_2a=outp.get("rejected_2a"),
+                          merges=n_merges, merges_s1=n_s1, merges_s2=n_s2,
+                          merges_final=n_fin, conflicts=outp.get("conflicts"),
+                          rejected_s1=outp.get("rejected_s1"),
+                          partition=data.get("partition"),
                           no_centroid=len(data.get("no_centroid") or []),
                           out_of_scope=data.get("out_of_scope"))
+        if n_merges != n_s1 + n_s2 + n_fin:
+            c.set(FAIL, f"merges ({n_merges}) != S1 ({n_s1}) + S2 ({n_s2}) + "
+                        f"final ({n_fin})")
         if int(inp.get("tracklets") or 0) != n_trk_pre:
             c.set(FAIL, f"sidecar received {inp.get('tracklets')} tracklets, the snapshot "
                         f"holds {n_trk_pre}")
@@ -1092,14 +1153,29 @@ class RunAudit(VideoLevelModule):
             c.set(FAIL, f"tracklets after ({n_trk_now}) != before ({n_trk_pre}) - "
                         f"merges ({n_merges})")
         tau = exp.get("tau")
-        dists = [m.get("distance") for m in (data.get("merge_log") or [])
-                 if m.get("distance") is not None]
-        if len(dists) != n_merges:
-            c.set(FAIL, f"{len(dists)} merge distances recorded for {n_merges} merges")
-        if dists:
-            c.observed["merge_distance_max"] = round(float(max(dists)), 4)
-            if tau is not None and max(dists) > float(tau) + 1e-6:
-                c.set(FAIL, f"a merge was accepted at distance {max(dists):.4f} > tau {tau}")
+        mlog = data.get("merge_log") or []
+        by_phase = {"s1": [], "s2": [], "final": []}
+        for m in mlog:
+            ph = m.get("phase")
+            if ph not in by_phase:
+                c.set(FAIL, f"merge with unknown phase {ph!r} in the merge log")
+            else:
+                by_phase[ph].append(m)
+        for ph, want in (("s1", n_s1), ("s2", n_s2), ("final", n_fin)):
+            if len(by_phase.get(ph, [])) != want:
+                c.set(FAIL, f"{len(by_phase.get(ph, []))} {ph} merges in the log, "
+                            f"the sidecar reports {want}")
+        # S2 and final merges are distance-gated; S1 merges are label-driven
+        # (no threshold, distance informational and possibly null).
+        gated = [m.get("distance") for m in by_phase["s2"] + by_phase["final"]]
+        if any(d is None for d in gated):
+            c.set(FAIL, "an S2/final merge carries no distance")
+        gated = [d for d in gated if d is not None]
+        if gated:
+            c.observed["merge_distance_max_gated"] = round(float(max(gated)), 4)
+            if tau is not None and max(gated) > float(tau) + 1e-6:
+                c.set(FAIL, f"an S2/final merge was accepted at distance "
+                            f"{max(gated):.4f} > tau {tau}")
         if int(outp.get("frame_collisions") or 0) or int(outp.get("clusters_incoherent") or 0):
             c.set(FAIL, f"the stage reported {outp.get('frame_collisions')} frame "
                         f"collision(s) and {outp.get('clusters_incoherent')} incoherent "
@@ -1156,12 +1232,14 @@ class RunAudit(VideoLevelModule):
 
     def _check_team_embed(self, seq, tracked):
         c = Check("team_embed (osnet_team + team clustering)",
-                  "team_embedding on the sampled SINGLE crops of every fragment that has "
-                  "one (fragments without a single crop legitimately have none); the "
-                  "checkpoint and cluster method that ran equal the configured ones; no "
-                  "empty/zero embeddings; team_cluster constant per fragment, values in "
-                  "{0, 1}, clustered count equals the sidecar's; team_cluster_nearest on "
-                  "every embedded fragment")
+                  "a team descriptor was formed for every fragment with a single crop "
+                  "(coverage audited via team_cluster_nearest, written for every "
+                  "embedded fragment and never rewritten -- team_embedding itself is "
+                  "legitimately cleared by traj_refine after the merge); the checkpoint "
+                  "and cluster method that ran equal the configured ones; no empty/zero "
+                  "embeddings; team_cluster constant per fragment, values in {0, 1}, "
+                  "clustered count equals the sidecar's; with kmeans2_nearest every "
+                  "embedded fragment is clustered (no outlier threshold)")
         for col in ("team_embedding", "team_cluster", "team_cluster_nearest"):
             if col not in tracked.columns:
                 c.observed[col] = "column missing"
@@ -1169,11 +1247,15 @@ class RunAudit(VideoLevelModule):
         if c.verdict == FAIL:
             return c
         n_tr = tracked["track_id"].nunique()
+        # team_cluster_nearest carries the per-fragment coverage: it is set on
+        # every fragment whose descriptor entered the clustering, and only
+        # exists when the sequence had >= 2 embedded fragments.
         covered = 0
         for tid, grp in tracked.groupby("track_id"):
-            if any(isinstance(e, np.ndarray) and e.size for e in grp["team_embedding"]):
+            if len(grp["team_cluster_nearest"].dropna()):
                 covered += 1
-        c.observed.update({"tracklets": int(n_tr), "tracklets_with_embedding": int(covered)})
+        c.observed.update({"tracklets": int(n_tr),
+                           "tracklets_with_nearest_id": int(covered)})
         data = self._read_sidecar(self.team_embed_sidecar_dir, seq)
         c.observed["sidecar"] = str(self.team_embed_sidecar_dir / f"{seq}.json") if self.team_embed_sidecar_dir else None
         if data is None:
@@ -1207,18 +1289,29 @@ class RunAudit(VideoLevelModule):
             if want is not None and got is not None and int(want) != int(got):
                 c.set(FAIL, f"{key} that ran ({got}) != configured ({want})")
 
-        # --- coverage: missing embeddings must equal the no-single fragments
+        # --- coverage: missing descriptors must equal the no-single fragments.
+        # Only checkable when the clustering ran (>= 2 embedded fragments):
+        # team_cluster_nearest does not exist below that.
         n_nosingle = int(data.get("fragments_no_single") or 0)
+        n_embedded_side = int((data.get("cluster") or {}).get("embedded") or 0)
         c.observed["fragments_no_single"] = n_nosingle
-        missing = int(n_tr) - int(covered)
-        extra_missing = missing - n_nosingle
-        if n_tr and covered == 0:
-            c.set(FAIL, "no fragment has a team embedding")
-        elif extra_missing > 0 and _share(extra_missing, n_tr) > self.thr["embed_missing_warn"]:
-            c.set(FAIL, f"{extra_missing} fragment(s) WITH single crops have no team "
-                        f"embedding (beyond the {n_nosingle} without any single crop)")
-        elif extra_missing > 0:
-            c.set(WARN, f"{extra_missing} fragment(s) with single crops lack an embedding")
+        c.observed["fragments_embedded_sidecar"] = n_embedded_side
+        if n_embedded_side >= 2:
+            missing = int(n_tr) - int(covered)
+            extra_missing = missing - n_nosingle
+            if n_tr and covered == 0:
+                c.set(FAIL, "no fragment has a team descriptor")
+            elif covered != n_embedded_side:
+                c.set(FAIL, f"{covered} fragment(s) carry a nearest-centroid id, the "
+                            f"sidecar reports {n_embedded_side} embedded")
+            elif extra_missing > 0 and _share(extra_missing, n_tr) > self.thr["embed_missing_warn"]:
+                c.set(FAIL, f"{extra_missing} fragment(s) WITH single crops have no team "
+                            f"descriptor (beyond the {n_nosingle} without any single crop)")
+            elif extra_missing > 0:
+                c.set(WARN, f"{extra_missing} fragment(s) with single crops lack a descriptor")
+        else:
+            c.set(INFO, f"{n_embedded_side} embedded fragment(s); the clustering (and "
+                        f"team_cluster_nearest) needs >= 2, coverage not recomputable")
 
         # --- the team clustering: method/params that ran, counts, recompute
         clus = data.get("cluster") or {}
@@ -1237,6 +1330,14 @@ class RunAudit(VideoLevelModule):
         sizes = clus.get("sizes") or [0, 0]
         if sum(int(s) for s in sizes) != n_clustered_side:
             c.set(FAIL, f"cluster sizes {sizes} do not sum to clustered ({n_clustered_side})")
+        if str(clus.get("method")) == "kmeans2_nearest":
+            if int(clus.get("unclustered_threshold") or 0):
+                c.set(FAIL, f"{clus.get('unclustered_threshold')} threshold-unclustered "
+                            f"fragment(s) under kmeans2_nearest (no threshold exists)")
+            if n_embedded_side >= 2 and n_clustered_side != n_embedded_side:
+                c.set(FAIL, f"kmeans2_nearest clustered {n_clustered_side} of "
+                            f"{n_embedded_side} embedded fragment(s); every embedded "
+                            f"fragment takes its nearest centroid")
         # recompute from the columns, on the fragment ids the stage saw.
         # traj_refine legitimately rewrites team_cluster afterwards (merged
         # clusters unify it; 3b-adopted rows take the target's), so on the
@@ -1251,7 +1352,6 @@ class RunAudit(VideoLevelModule):
         bad_const = 0
         clustered_now = 0
         vals = set()
-        nearest_missing = 0
         for tid, grp in tracked.groupby("track_id"):
             cl = grp[cl_col].dropna()
             if grp[cl_col].nunique(dropna=True) > 1:
@@ -1259,13 +1359,9 @@ class RunAudit(VideoLevelModule):
             if len(cl):
                 clustered_now += 1
                 vals.update(float(v) for v in cl.unique())
-            has_emb = any(isinstance(e, np.ndarray) and e.size for e in grp["team_embedding"])
-            if has_emb and grp["team_cluster_nearest"].dropna().empty:
-                nearest_missing += 1
         c.observed.update(clustered_recomputed=clustered_now,
                           cluster_values=sorted(vals),
-                          cluster_constancy_violations=bad_const,
-                          embedded_without_nearest=nearest_missing)
+                          cluster_constancy_violations=bad_const)
         if bad_const:
             c.set(FAIL, f"team_cluster varies inside {bad_const} fragment(s)")
         if not vals <= {0.0, 1.0}:
@@ -1273,9 +1369,6 @@ class RunAudit(VideoLevelModule):
         if clustered_now != n_clustered_side:
             c.set(FAIL, f"{clustered_now} clustered fragment(s) in the state, the sidecar "
                         f"reports {n_clustered_side}")
-        if nearest_missing:
-            c.set(FAIL, f"{nearest_missing} embedded fragment(s) without a "
-                        f"team_cluster_nearest fallback id")
         n_uncl = int(n_tr) - clustered_now
         c.observed["unclustered"] = n_uncl
         if n_tr and clustered_now == 0:
@@ -1287,42 +1380,58 @@ class RunAudit(VideoLevelModule):
         after traj_refine and is the last labelling stage, so the live columns
         grouped by the final ids ARE its output -- no snapshots needed)."""
         c = Check("role_team (per-trajectory roles + sides, after traj_refine)",
-                  "every tracked row has a role in {player, goalkeeper, referee}; players "
+                  "every tracked SINGLE row has a role in {player, goalkeeper, referee}; "
+                  "multi rows carry NO role and NO team (labels are applied to single "
+                  "crops only); single players "
                   "and goalkeepers have team in {left, right}, referees none; role and "
-                  "team constant per trajectory; both teams present; at most one main "
-                  "referee, at most one assistant per side, at most one accepted keeper "
-                  "per half; parameters that ran equal the configured ones; sidecar "
-                  "covers every trajectory; fallback counts consistent")
-        for col in ("role", "team", "team_cluster"):
+                  "team constant over each trajectory's single rows; at most one main "
+                  "referee, one "
+                  "assistant per side and one goalkeeper per half (algorithm "
+                  "invariants); parameters that ran equal "
+                  "the configured ones (appearance recomputed from clean crops: 2-means "
+                  "+ MAD rule + DBSCAN); sidecar covers every trajectory; outlier group "
+                  "and fallback counts consistent. Scene composition (team/keeper "
+                  "counts) is recorded as information only, never a verdict")
+        for col in ("role", "team", "crop_single"):
             if col not in tracked.columns:
                 c.observed[col] = "column missing"
                 c.set(FAIL, f"{col} column missing")
         if c.verdict == FAIL:
             return c
-        role = tracked["role"]
+        sing_mask = tracked["crop_single"].astype(bool)
+        t_single = tracked[sing_mask]
+        t_multi = tracked[~sing_mask]
+        role = t_single["role"]
         bad_role = int((~role.isin(["player", "goalkeeper", "referee"])).sum())
-        c.observed["rows_without_valid_role"] = bad_role
+        c.observed["single_rows_without_valid_role"] = bad_role
         if bad_role:
-            c.set(FAIL, f"{bad_role} tracked rows without a valid role")
-        pg = tracked[role.isin(["player", "goalkeeper"])]
+            c.set(FAIL, f"{bad_role} tracked SINGLE rows without a valid role")
+        # ghost rule: multi rows receive no labels from this stage
+        m_role = int(t_multi["role"].notna().sum()) if len(t_multi) else 0
+        m_team = int(t_multi["team"].notna().sum()) if len(t_multi) else 0
+        c.observed.update({"multi_rows": int(len(t_multi)),
+                           "multi_rows_with_role": m_role,
+                           "multi_rows_with_team": m_team})
+        if m_role or m_team:
+            c.set(FAIL, f"{m_role} multi row(s) carry a role and {m_team} a team; "
+                        f"labels are applied to single crops only")
+        pg = t_single[role.isin(["player", "goalkeeper"])]
         has = pg["team"].isin(["left", "right"])
         c.observed.update({"player_gk_rows": int(len(pg)), "rows_missing_team": int((~has).sum()),
                            "left_tracklets": int(pg[pg["team"] == "left"]["track_id"].nunique()),
                            "right_tracklets": int(pg[pg["team"] == "right"]["track_id"].nunique()),
-                           "referee_tracklets": int(tracked[role == "referee"]["track_id"].nunique()),
-                           "goalkeeper_tracklets": int(tracked[role == "goalkeeper"]["track_id"].nunique())})
+                           "referee_tracklets": int(t_single[role == "referee"]["track_id"].nunique()),
+                           "goalkeeper_tracklets": int(t_single[role == "goalkeeper"]["track_id"].nunique())})
         if len(pg) and int((~has).sum()):
-            c.set(FAIL, f"{int((~has).sum())} player/GK rows without team")
-        ref_team = int(tracked[(role == "referee") & tracked["team"].isin(["left", "right"])].shape[0])
+            c.set(FAIL, f"{int((~has).sum())} player/GK single rows without team")
+        ref_team = int(t_single[(role == "referee") & t_single["team"].isin(["left", "right"])].shape[0])
         if ref_team:
             c.set(FAIL, f"{ref_team} referee rows carry a team")
         for col in ("role", "team"):
-            bad = self._per_track_constant(tracked, col)
+            bad = self._per_track_constant(t_single, col)
             c.observed[f"{col}_inconsistent_tracks"] = len(bad)
             if bad:
-                c.set(FAIL, f"{col} varies within {len(bad)} trajectories")
-        if len(pg) and (c.observed["left_tracklets"] == 0 or c.observed["right_tracklets"] == 0):
-            c.set(WARN, "only one team present")
+                c.set(FAIL, f"{col} varies within {len(bad)} trajectories (single rows)")
         data = self._read_sidecar(self.role_team_sidecar_dir, seq)
         c.observed["sidecar"] = str(self.role_team_sidecar_dir / f"{seq}.json") if self.role_team_sidecar_dir else None
         if data is None:
@@ -1349,14 +1458,27 @@ class RunAudit(VideoLevelModule):
         c.observed.update({"named_left_cluster": lvl.get("named_left_cluster"),
                            "cues": lvl.get("cues"), "band_2_14": lvl.get("band"),
                            "main_referee": lvl.get("main_referee"),
-                           "n_unclustered": lvl.get("n_unclustered"),
-                           "n_fallback_nearest": lvl.get("n_fallback_nearest"),
-                           "n_fallback_half": lvl.get("n_fallback_half")})
+                           "main_referee_rule": lvl.get("main_referee_rule"),
+                           "dbscan_eps": lvl.get("dbscan_eps"),
+                           "dbscan": lvl.get("dbscan"),
+                           "gk_selection": lvl.get("gk_selection"),
+                           "assistant_selection": lvl.get("assistant_selection"),
+                           "n_outlier": lvl.get("n_outlier"),
+                           "outlier_group": lvl.get("outlier_group"),
+                           "n_outlier_geometry_kept": lvl.get("n_outlier_geometry_kept"),
+                           "n_no_embedding": lvl.get("n_no_embedding"),
+                           "n_fallback_half": lvl.get("n_fallback_half"),
+                           "gk_depth_ref": lvl.get("gk_depth_ref"),
+                           "n_multi_rows_unlabelled": lvl.get("n_multi_rows_unlabelled")})
+        if lvl.get("n_multi_rows_unlabelled") is not None \
+                and int(lvl["n_multi_rows_unlabelled"]) != int(len(t_multi)):
+            c.set(FAIL, f"sidecar reports {lvl['n_multi_rows_unlabelled']} unlabelled "
+                        f"multi row(s), the state holds {len(t_multi)}")
         reasons = {}
         for r in per:
             reasons[r.get("why")] = reasons.get(r.get("why"), 0) + 1
         c.observed["reasons"] = reasons
-        # per-clip structure of the new rule set
+        # per-clip structure of the rule set
         if reasons.get("main_2.14", 0) > 1:
             c.set(FAIL, f"{reasons['main_2.14']} main referees (rule allows one)")
         n_assist = reasons.get("assistant", 0)
@@ -1366,15 +1488,63 @@ class RunAudit(VideoLevelModule):
         for r in per:
             if r.get("role") == "goalkeeper":
                 n_gk_side[r.get("team")] = n_gk_side.get(r.get("team"), 0) + 1
-        if any(v > 2 for v in n_gk_side.values()):
-            c.set(FAIL, f"more than two goalkeeper trajectories on one side: {n_gk_side}")
+        # exactly one keeper per half by construction (there is no
+        # second-keeper confirmation channel): two on one side is an
+        # algorithm violation. Team composition itself is still recorded,
+        # never judged: a one-team clip can be a correct run.
+        c.observed["goalkeepers_per_side"] = n_gk_side
+        for side_name, cnt in n_gk_side.items():
+            if cnt > 1:
+                c.set(FAIL, f"{cnt} goalkeepers on the {side_name} side "
+                            f"(rule allows one per half)")
+        # outlier group consistency: the sequence-level group vs the per-trajectory flags
+        flagged = [r.get("track_id") for r in per if r.get("outlier")]
+        group = lvl.get("outlier_group")
+        if group is not None and sorted(map(float, group)) != sorted(map(float, flagged)):
+            c.set(FAIL, "outlier_group disagrees with the per-trajectory outlier flags")
+        if group is not None and int(lvl.get("n_outlier") or 0) != len(group):
+            c.set(FAIL, "n_outlier disagrees with the outlier_group length")
+        # global DBSCAN bookkeeping: one DBSCAN over all descriptors. The
+        # sidecar's noise count must equal the per-trajectory out_db flags
+        # (so the record cannot disagree with the flags it fed into
+        # outlier_group), stay within the descriptor count, and no out_db
+        # flag may exist when the channel did not run.
+        db = lvl.get("dbscan")
+        if db is not None:
+            n_out_db = sum(1 for r in per if r.get("out_db"))
+            n_noise = int(db.get("n_noise") or 0)
+            n_desc = int(db.get("n_desc") or 0)
+            if n_noise > n_desc:
+                c.set(FAIL, f"DBSCAN noise ({n_noise}) > descriptors ({n_desc})")
+            if n_noise != n_out_db:
+                c.set(FAIL, f"DBSCAN noise ({n_noise}) disagrees with the "
+                            f"per-trajectory out_db flags ({n_out_db})")
+            if not db.get("ran") and n_out_db:
+                c.set(FAIL, f"{n_out_db} out_db flag(s) although DBSCAN did not run")
+        # robust-refit MAD channel bookkeeping: the final rule flags are the
+        # UNION of the first pass and the refit pass (monotone -- the refit
+        # can only add), and the sidecar's counts must agree with the
+        # per-trajectory out_rule flags.
+        mr = lvl.get("mad_refit")
+        if mr is not None:
+            c.observed["mad_refit"] = mr
+            n_out_rule = sum(1 for r in per if r.get("out_rule"))
+            if int(mr.get("flags_final") or 0) != n_out_rule:
+                c.set(FAIL, f"mad_refit.flags_final ({mr.get('flags_final')}) disagrees with "
+                            f"the per-trajectory out_rule flags ({n_out_rule})")
+            if int(mr.get("flags_final") or 0) < int(mr.get("flags_first_pass") or 0):
+                c.set(FAIL, "mad_refit.flags_final < flags_first_pass: the refit removed a "
+                            "rule flag (the union must be monotone)")
+            if not mr.get("refit_ran"):
+                if mr.get("m_refit") is not None or mr.get("flags_refit") is not None:
+                    c.set(FAIL, "mad_refit reports refit statistics although the refit did not run")
+                if int(mr.get("flags_final") or 0) != int(mr.get("flags_first_pass") or 0):
+                    c.set(FAIL, "refit did not run but flags_final != flags_first_pass")
         # fallback consistency: sidecar counts vs the recorded reasons
-        if int(lvl.get("n_fallback_nearest") or 0) != reasons.get("player_nearest_centroid", 0):
-            c.set(FAIL, "fallback count n_fallback_nearest disagrees with the per-trajectory reasons")
         if int(lvl.get("n_fallback_half") or 0) != reasons.get("player_half_fallback", 0):
             c.set(FAIL, "fallback count n_fallback_half disagrees with the per-trajectory reasons")
         if lvl.get("n_fallback_half"):
-            c.set(WARN, f"{lvl['n_fallback_half']} trajector(ies) with no embedding took the "
+            c.set(WARN, f"{lvl['n_fallback_half']} trajector(ies) with no descriptor took the "
                         f"mean-x half fallback for their side")
         if per and not tracked.empty and len(per) != tracked["track_id"].nunique():
             c.set(FAIL, f"sidecar covers {len(per)} trajectories, detections hold "
@@ -1382,18 +1552,27 @@ class RunAudit(VideoLevelModule):
         return c
 
     def _check_visualization(self, det, tracked):
-        c = Check("visualization (radar)", "every tracked row with a pitch position "
-                                            "is drawn with a team/referee colour")
+        c = Check("visualization (radar)", "every tracked SINGLE row with a pitch "
+                                            "position is drawn with a team/referee "
+                                            "colour (multi rows carry no role/team "
+                                            "by design and are expected uncoloured)")
         drawable = tracked[tracked["bbox_pitch"].apply(lambda b: isinstance(b, dict))] \
             if "bbox_pitch" in tracked.columns else tracked.iloc[0:0]
-        skipped = int(sum(1 for _, r in drawable.iterrows() if radar_color(r) is None))
+        if "crop_single" in drawable.columns:
+            d_single = drawable[drawable["crop_single"].astype(bool)]
+            n_multi_drawable = int(len(drawable) - len(d_single))
+        else:
+            d_single, n_multi_drawable = drawable, 0
+        skipped = int(sum(1 for _, r in d_single.iterrows() if radar_color(r) is None))
         c.observed = {"untracked_rows_not_drawn": int(len(det) - len(tracked)),
                       "tracked_rows_with_pitch": int(len(drawable)),
-                      "tracked_rows_skipped_no_colour": skipped}
-        share = _share(skipped, len(drawable))
+                      "single_rows_with_pitch": int(len(d_single)),
+                      "multi_rows_with_pitch_uncoloured_by_design": n_multi_drawable,
+                      "single_rows_skipped_no_colour": skipped}
+        share = _share(skipped, len(d_single))
         c.observed["skipped_share"] = round(share, 4)
         if share > self.thr["radar_skipped_tracked_warn"]:
-            c.set(WARN, f"{share:.1%} tracked rows have no team/referee colour")
+            c.set(WARN, f"{share:.1%} tracked single rows have no team/referee colour")
         return c
 
     # ---------------------------------------------------------------- main --

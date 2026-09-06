@@ -14,7 +14,7 @@ module supplies its inputs and applies its output:
    scale it was tuned on. A degenerate box or unreadable frame keeps an
    all-zero feature; a trajectory with no usable embedding never merges.
 2. Per-fragment labels: ``team_cluster`` (the team_embed stage's cluster id;
-   NaN = unclustered, which imposes no merge condition),
+   NaN = no cluster, and a fragment with no cluster id never merges),
    ``jersey_number_detection`` (first non-null), and the jersey stage's
    ``jersey_number_candidates`` (pooled ``[label, mx, conf_sum, votes]``
    stats). Every fragment is in scope -- there is no role to exempt anyone.
@@ -22,22 +22,30 @@ module supplies its inputs and applies its output:
    frame equality and time order are the dataset's, not ``image_id`` order.
    The image width for the re-enter test is read off the first frame the
    feature extraction loads.
-4. Refine: five phases of ONE identical agglomerative procedure (minimum-
-   distance pair merges while distance <= tau, under clean-frame
-   disjointness, re-enter consistency, cluster agreement and number
-   agreement -- each label condition applying only when both sides know it;
-   two fragments with two different known numbers never merge). Phases 1-4
-   run in isolation on the fragments pooled by the labels they arrive with
-   (S1 cluster+number, S2 cluster only, S3 number only, S4 neither); phase 5
-   pools every cluster, merged or not. In phases 1, 3 and 5 (where
-   same-number pairs are examined) time-overlapping same-number claims are
-   conflicts, resolved by maxconf with the loser walking down its candidate
-   list, to a fixpoint before each agglomerative pass.
+4. Refine, in THREE PHASES over a partition of the fragments by label
+   knowledge (S1: cluster AND number known; S2: cluster known, number
+   unknown; a fragment with no cluster id never merges). Phase S1: within
+   S1, same-cluster same-number merges under clean-frame disjointness and
+   re-enter consistency, NO distance threshold; overlap conflicts resolved
+   by maxconf, the loser walking down its candidate list (an unnumbered
+   loser joins S2). Phase S2: within S2, agglomerative merging under equal
+   cluster, clean-frame disjointness and re-enter, distance <= ``tau``.
+   Final phase: over ALL S1 and S2 survivors, merged and unmerged alike,
+   agglomerative under clean-frame disjointness, re-enter, SAME cluster id
+   and no contradicting numbers (two different known numbers never merge),
+   distance <= ``tau``. Multi-crop detections are ghosts throughout: no
+   centroid, no condition -- they follow their fragment (their one
+   exception is stage 3).
 5. Apply: rows of a merged cluster take the smallest constituent ``track_id``.
    For every cluster the resolved number, its vote share and its maxconf
    score are written to ALL member rows (so the downstream majority vote
    cannot be flipped by row counts); a merged cluster additionally unifies
    ``team_cluster`` (the known id, or NaN). Unassigned rows are untouched.
+6. Drop the fragment-level team embeddings: after the merge, trajectories
+   carry the jersey evidence only -- ``team_embedding`` is cleared on every
+   row (``team_cluster`` / ``team_cluster_nearest`` remain as inert
+   snapshots). Roles and team sides are recomputed from scratch by the
+   ``role_team`` stage, on the finished trajectories' clean crops.
 
 Snapshots for the audit: the incoming ids, jersey columns and the cluster id
 are kept in ``track_id_prerefine``, ``jersey_number_detection_prerefine``,
@@ -62,7 +70,7 @@ its own output and logs an error if either fails. Tracked rows out = tracked
 rows in minus the unassigned count -- the ONLY way this stage drops a row.
 
 Audit sidecar: ``<audit_dir>/<sequence>.json`` with the settings and embedder
-digest that ran, input counts, the merge and conflict log of the five
+digest that ran, input counts, the merge/conflict/rejection log of the three
 phases, output counts and a per-cluster breakdown. The run audit compares it
 with the composed config and the detections it receives.
 """
@@ -114,9 +122,13 @@ class TrajRefine(VideoLevelModule):
         self.enabled = bool(getattr(cfg, "enabled", True))
         self.tau = float(cfg.tau)
         self.use_reenter = bool(getattr(cfg, "use_reenter", True))
+        self.edge_margin = float(getattr(cfg, "edge_margin", 0.02))
         self.batch_size = int(getattr(cfg, "batch_size", 64))
         if not (0.0 <= self.tau <= 2.0):
             raise ValueError(f"[traj_refine] tau must be in [0, 2], got {self.tau}")
+        if not (0.0 <= self.edge_margin < 0.5):
+            raise ValueError(f"[traj_refine] edge_margin must be in [0, 0.5), "
+                             f"got {self.edge_margin}")
         self.audit_dir = Path(str(cfg.audit_dir)) if getattr(cfg, "audit_dir", None) else None
         if self.audit_dir:
             self.audit_dir.mkdir(parents=True, exist_ok=True)
@@ -125,7 +137,7 @@ class TrajRefine(VideoLevelModule):
         # so a disabled stage costs nothing.
         self._embedder = None
         log.info(f"[traj_refine] enabled {self.enabled}, tau {self.tau}, "
-                 f"use_reenter {self.use_reenter} (whole-frame-width sides); "
+                 f"use_reenter {self.use_reenter}, edge_margin {self.edge_margin}; "
                  f"labels = team cluster + jersey number (roles/sides are assigned "
                  f"after this stage)")
 
@@ -197,9 +209,10 @@ class TrajRefine(VideoLevelModule):
     # --------------------------------------------------------------- tracks --
     def _track_info(self, work: pd.DataFrame, record: dict):
         """Per-fragment labels for the merge: the TEAM CLUSTER id written by the
-        team_embed stage (a float, NaN = unclustered) and the jersey evidence.
-        Roles and team sides do not exist yet -- they are assigned after this
-        stage, on finished trajectories -- so every fragment is in scope."""
+        team_embed stage (a float; NaN = no cluster, and such a fragment never
+        merges) and the jersey evidence. Roles and team sides do not exist yet
+        -- they are assigned after this stage, on finished trajectories -- so
+        every fragment is in scope."""
         tracks = {}
         for tid, grp in work.groupby("_tid"):
             cl = [v for v in grp["team_cluster"] if not _is_null(v)] \
@@ -235,15 +248,17 @@ class TrajRefine(VideoLevelModule):
 
         record = dict(sequence=seq, ran=False,
                       settings=dict(enabled=self.enabled, tau=self.tau,
-                                    use_reenter=self.use_reenter),
+                                    use_reenter=self.use_reenter,
+                                    edge_margin=self.edge_margin),
                       embedder=None,
                       inputs=dict(detections=int(len(detections)), tracked=0,
                                   tracklets=0),
-                      outputs=dict(tracklets=0, merges=0,
-                                   merges_by_phase={str(p): 0 for p in range(1, 6)},
-                                   conflicts=0,
+                      outputs=dict(tracklets=0, merges=0, merges_s1=0,
+                                   merges_s2=0, merges_final=0, conflicts=0,
+                                   rejected_s1=0,
                                    rows_relabelled=0, rows_unassigned=0,
-                                   frame_collisions=0))
+                                   frame_collisions=0,
+                                   team_embedding_dropped=False))
         if not self.enabled:
             log.info(f"[traj_refine] {seq}: disabled; snapshots written, "
                      f"nothing changed")
@@ -259,7 +274,7 @@ class TrajRefine(VideoLevelModule):
             if col not in detections.columns:
                 raise RuntimeError(f"[traj_refine] {seq}: {col} column missing - "
                                    f"the stage must run after crop_filter, "
-                                   f"role_team and jersey_number_detect")
+                                   f"team_embed and jersey_number_detect")
 
         work = out[out["track_id"].notna()].copy()
         record["inputs"]["tracked"] = int(len(work))
@@ -287,7 +302,7 @@ class TrajRefine(VideoLevelModule):
 
         new_tid, resolved, rep = tr.refine_video(
             feats, single, frames, boxes, work["_tid"].to_numpy(), tracks,
-            img_w, self.tau, self.use_reenter)
+            img_w, self.tau, self.use_reenter, self.edge_margin)
         record["ran"] = True
 
         # ----------------------------------------------------------- apply --
@@ -308,6 +323,14 @@ class TrajRefine(VideoLevelModule):
                 out.loc[rows, "team_cluster"] = (float(res["cluster"])
                                                  if res["cluster"] is not None
                                                  else np.nan)
+
+        # After the merge, trajectories carry the jersey evidence only: the
+        # fragment-level team embeddings are dropped (roles and sides are
+        # recomputed from clean crops by role_team). team_cluster and
+        # team_cluster_nearest stay as inert snapshots.
+        if "team_embedding" in out.columns:
+            out["team_embedding"] = None
+            record["outputs"]["team_embedding_dropped"] = True
 
         # ------------------------------------------------------ self-checks --
         tracked_out = out[out["track_id"].notna()]
@@ -332,22 +355,27 @@ class TrajRefine(VideoLevelModule):
                       f"({int(tracked_out['track_id'].notna().sum())}) != tracked in "
                       f"({len(work)}) - stage-3 unassigned ({n_unassigned})")
 
-        by_phase = {str(p): 0 for p in range(1, 6)}
-        for m in rep["merges"]:
-            by_phase[str(m["phase"])] += 1
-        record["phases"] = dict(pools=rep["pools"],
-                                clusters_after_phase=rep["clusters_after_phase"],
-                                merges_by_phase=dict(by_phase),
-                                conflicts=len(rep["conflicts"]),
-                                conflict_log=rep["conflicts"])
+        merges_s1 = sum(1 for m in rep["merges"] if m["phase"] == "s1")
+        merges_s2 = sum(1 for m in rep["merges"] if m["phase"] == "s2")
+        merges_final = sum(1 for m in rep["merges"] if m["phase"] == "final")
+        record["partition"] = dict(rep["partition"])
+        record["phase_s1"] = dict(merges=merges_s1, conflicts=len(rep["conflicts"]),
+                                  rejected=len(rep["rejected_s1"]),
+                                  conflict_log=rep["conflicts"],
+                                  rejected_log=rep["rejected_s1"],
+                                  clusters_after=rep["clusters_after_s1"])
+        record["phase_s2"] = dict(merges=merges_s2,
+                                  clusters_after=rep["clusters_after_s2"])
+        record["phase_final"] = dict(merges=merges_final)
         record["stage3"] = dict(rep["stage3"])
         record["merge_log"] = rep["merges"]
         record["no_centroid"] = rep["no_centroid"]
         record["out_of_scope"] = rep["out_of_scope"]
         record["outputs"].update(
             tracklets=int(tracked_out["track_id"].nunique()),
-            merges=len(rep["merges"]), merges_by_phase=dict(by_phase),
-            conflicts=len(rep["conflicts"]),
+            merges=len(rep["merges"]), merges_s1=merges_s1, merges_s2=merges_s2,
+            merges_final=merges_final,
+            conflicts=len(rep["conflicts"]), rejected_s1=len(rep["rejected_s1"]),
             rows_relabelled=int(n_relabel), rows_unassigned=n_unassigned,
             frame_collisions=coll, clusters_incoherent=n_incoherent)
         record["per_cluster"] = [
@@ -358,10 +386,13 @@ class TrajRefine(VideoLevelModule):
                  maxconf=round(res["maxconf"], 6))
             for k, res in sorted(resolved.items()) if len(res["tids"]) > 1]
 
-        log.info(f"[traj_refine] {seq}: {record['inputs']['tracklets']} fragments "
-                 f"-> {record['outputs']['tracklets']} (merges by phase "
-                 f"{by_phase}, {len(rep['conflicts'])} number conflict(s) "
-                 f"resolved, {len(rep['no_centroid'])} without a centroid, "
+        log.info(f"[traj_refine] {seq}: {record['inputs']['tracklets']} trajectories "
+                 f"-> {record['outputs']['tracklets']} "
+                 f"(partition {rep['partition']}; {merges_s1} S1 + {merges_s2} S2 "
+                 f"+ {merges_final} final merges, "
+                 f"{len(rep['conflicts'])} number conflict(s) resolved, "
+                 f"{len(rep['rejected_s1'])} S1 pair(s) rejected, "
+                 f"{len(rep['no_centroid'])} without a centroid, "
                  f"{rep['out_of_scope']} out of scope; stage 3: "
                  f"{rep['stage3']['held']} held, {rep['stage3']['placed']} placed, "
                  f"{rep['stage3']['unassigned']} unassigned)")

@@ -2,10 +2,9 @@
 #
 # ONE entry config, ONE path through the pipeline. No alternative backends.
 #
-#   bbox_detector  YOLO11-L "HM" fine-tune (HF Ynniss/YOLOv11L_HM)      -> bbox_ltwh, bbox_conf
-#                  (default; the frozen-baseline fine-tune yolov11_sn_best is the
-#                   alternative via the defaults group:
-#                   `modules/bbox_detector=yolo_ultralytics_snft`
+#   bbox_detector  YOLO11-L "HM" fine-tune (HF YOLOv11L_HM)    -> bbox_ltwh, bbox_conf
+#                  (default; the earlier fine-tune yolov11_sn_best is the alternative via
+#                   the defaults group: `modules/bbox_detector=yolo_ultralytics_snft`
 #                   — same operating point, different weights; see either detector config
 #                   for cache notes)
 #   track          BoT-SORT · SOF + OSNet-AIN (boxmot)        -> track_id
@@ -13,26 +12,39 @@
 #   calibration    BroadTrack (EVS, WACV'25) + image-to-pitch -> parameters, bbox_pitch
 #   pitch_gate     off-pitch tracklets (mean bbox_pitch outside  -> track_id NaN on their rows,
 #                  105x68 m + margin_m; on/off switch)             track_id_pregate, pitch_gate_offpitch
-#   tracklet_split DBSCAN tracklet split (SPLIT ONLY), on-pitch  -> track_id (fragments), track_id_presplit
-#                  tracklets only (same OSNet-AIN as the tracker; reads crop_single)
+#   tracklet_split DBSCAN tracklet split (SPLIT ONLY) over SINGLE  -> track_id (fragments), track_id_presplit
+#                  detections, on-pitch tracklets only (same OSNet-AIN as the tracker;
+#                  reads crop_single); multi detections are unembedded GHOSTS attached
+#                  by time/space (all-multi tracklets dissolved across the video)
 #   team_embed     osnet_team on sampled SINGLE crops/fragment  -> team_embedding,
-#                  + 2-means TEAM CLUSTERING with a robust           team_cluster (0/1 or NaN),
-#                  distance threshold (kit outliers unclustered)    team_cluster_nearest
+#                  + 2-means TEAM CLUSTERING, every embedded        team_cluster (0/1; NaN only
+#                  fragment -> nearest centroid (kmeans2_nearest,   with no descriptor),
+#                  no outlier threshold)                            team_cluster_nearest
 #   jersey_number  jn_pipeline_gsr (legibility -> DBNet++ -> PARSeq + SATRN -> vote_pool), multi-GPU;
 #                  eligibility = at least one single crop (NO role filter)
 #                  + per-fragment maxconf candidate stats  -> jersey_number_candidates, jersey_number_maxconf
-#   traj_refine    the pipeline's ONE merge, on CLUSTER + number evidence: five
-#                  phases of one agglomerative procedure (pools by arrival labels:
-#                  cluster+number / cluster / number / neither, each in isolation,
-#                  then everything) under clean-frame disjointness, re-enter
-#                  consistency and non-contradicting cluster/number labels;
-#                  number-conflict resolution in phases 1/3/5; duplicate-frame
-#                  resolution with dynamic centroids (stage 3); same OSNet-AIN
-#                  as track / tracklet_split
+#   traj_refine    the pipeline's ONE merge, on CLUSTER + number evidence, in THREE
+#                  phases by label knowledge (unclustered fragments never merge):
+#                  S1 = cluster+number known, same-cluster same-number merges, NO
+#                  distance threshold, number conflicts resolved by maxconf; S2 =
+#                  cluster known / number unknown, agglomerative within tau; FINAL =
+#                  all S1+S2 survivors pooled, same cluster + no contradicting
+#                  numbers, within tau; clean-frame disjointness + re-enter in every
+#                  phase; centroids clean-only (multi rows are ghosts); duplicate-
+#                  frame resolution with dynamic centroids (stage 3, the ghosts' one
+#                  exception); same OSNet-AIN as track / tracklet_split; DROPS the
+#                  fragment team embeddings after the merge (trajectories carry the
+#                  jersey evidence only; team_cluster* kept as inert snapshots)
 #                  -> track_id (trajectories), track_id_prerefine + jersey/cluster snapshots
-#   role_team      per-TRAJECTORY roles and sides, AFTER the merge: assistants,
-#                  goalkeepers, main referee (rule 2.14), cluster -> left/right
-#                  naming, fallbacks for unclustered players  -> role, team
+#   role_team      per-TRAJECTORY roles and sides, AFTER the merge, recomputed from
+#                  CLEAN crops (all statistics over SINGLE rows; labels WRITTEN on
+#                  single rows only): osnet_team descriptors per trajectory; outliers by
+#                  2-means + MAD rule and a trajectory-level DBSCAN (unrelated to the
+#                  splitter's); assistants FIRST (no jersey number, min_n positions),
+#                  geometry-first; goalkeepers geometry + depth > gk_rel * max
+#                  non-assistant |mean x|; main referee = outlier + band (2.14) +
+#                  no number + closest appearance to the assistants;
+#                  2-means refit on clean players -> left/right naming  -> role, team
 #   tracklet_agg   majority vote over [jersey_number]
 #   audit          per-component PASS/WARN/FAIL verdicts -> audit/<seq>.json (read-only)
 #
@@ -50,7 +62,7 @@
 #   python scripts/verify_broadtrack_conversion.py -c <calib.json> -f <frames dir>
 # Run:
 #   tracklab -cn soccernet
-#   tracklab -cn soccernet modules/bbox_detector=yolo_ultralytics_snft   # frozen-baseline detector
+#   tracklab -cn soccernet modules/bbox_detector=yolo_ultralytics_snft   # earlier detector
 # Reference metrics (saved separately from the pipeline eval):
 #   python scripts/reference_metrics.py --state states/sn-gamestate.pklz \
 #       --dataset-path data/SoccerNetGS --eval-set test --out reference_metrics
@@ -85,9 +97,11 @@ defaults:
 #     and gating first means the splitter never works on off-pitch tracklets;
 #   * tracklet_split before team_embed/jersey (both are fragment-level);
 #   * team_embed (embedding + TEAM CLUSTER) and jersey_number_detect before
-#     traj_refine: the one merge decides on cluster + number evidence;
+#     traj_refine: the one merge decides on cluster + number evidence; the
+#     fragment embeddings are dropped once the merge is done;
 #   * role_team AFTER traj_refine: roles and sides are assigned once, on the
-#     finished trajectories, where the evidence is strongest;
+#     finished trajectories, where the evidence is strongest, from appearance
+#     the stage recomputes itself on clean crops;
 #   * audit LAST: it reads every column the other stages produce and writes none.
 pipeline:
   - bbox_detector

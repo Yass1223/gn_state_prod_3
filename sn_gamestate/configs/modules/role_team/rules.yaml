@@ -1,42 +1,84 @@
 # Role (player / goalkeeper / referee) and team SIDE (left / right) per FINAL
-# trajectory. Runs AFTER traj_refine. Since batch 11 the TEAM CLUSTERING IS
-# RECOMPUTED HERE, on the final trajectories: per-trajectory descriptor =
-# L2-normalised median of the trajectory's embedded crops (all merged fragments
-# contribute), then the same kmeans2_threshold rule as team_embed (2-means +
-# robust MAD threshold, outlier_k) -- more crops per descriptor than at fragment
-# level, so cleaner separation and a cleaner outlier signal. The recomputed
-# team_cluster / team_cluster_nearest OVERWRITE the columns (constant per final
-# trajectory); team_embed's fragment-level clustering keeps feeding traj_refine.
-# "Appearance outlier" (= unclustered) refers to THIS clustering.
+# trajectory. Runs AFTER traj_refine -- roles and sides are decided once, on
+# complete trajectories with full temporal and positional evidence, and never
+# gate the merge. The fragment-level team embeddings are dropped by
+# traj_refine (team_cluster / team_cluster_nearest remain as inert snapshots
+# and are NOT read here): this stage recomputes appearance ITSELF from the
+# clean (single) crops of each trajectory.
 #
-# Rules (sn_gamestate/team/role_team_api.py): assistants by the touchline
-# geometry, one per side (several candidates on a side: the one most outlier
-# from both team clusters, i.e. largest distance to its nearer 2-means
-# centroid); goalkeepers by penalty-area depth (one per half); the
-# MAIN referee =
-# among the remaining unclustered trajectories, those whose sampled y-range
-# stays inside the symmetric 90% band of the trajectory means (rule 2.14:
-# max(y_ref) <= band * max_i(mean_y_i) and min(y_ref) >= band * min_i(mean_y_i)),
-# the candidate nearest the assistants; everyone else a player. Sides: the two
-# team clusters are named by the cue chain over player mean-x (side_rule);
-# an unclustered player takes its NEAREST centroid's side
-# (team_cluster_nearest, a flagged fallback); a player with no embedding takes
-# its mean-x half.
+# GHOST RULE: every statistic, every candidate condition and the written
+# labels use SINGLE (crop_single) detections only. Multi-crop rows contribute
+# nothing and RECEIVE nothing -- role/team stay empty on them.
 #
-# Geometry thresholds carried over from the notebook's operating point
-# (tau_a/tau_a_sy/tau_m/confirm/side_rule), tau_a and tau_a_sy since adjusted
-# on this pipeline; band is this stage's own.
-# UNTUNED on this pipeline's trajectories: sweep on valid later.
+# Rules (sn_gamestate/team/role_team_api.py):
+# * one appearance descriptor per trajectory (osnet_team on <= crops_per_track
+#   sampled single crops, L2-normalised median); per-trajectory geometry
+#   (mean/std x and y, q75 |x|, y-range) and the sampled position count n
+#   over the SINGLE detections on the stride grid; the trajectory's jersey
+#   number read from jersey_number_detection (written by traj_refine);
+# * outlier channels over the descriptors -- 2-means + the robust distance
+#   rule (d > median + k * MAD, active when the spread is meaningful; after
+#   the first pass the two centroids are REFIT on the unflagged descriptors
+#   only, every trajectory is re-measured, the rule is applied once more,
+#   and the final rule flags are the UNION of the two passes -- the refit
+#   can only add flags, never remove) and a
+#   DBSCAN on cosine distance over ALL descriptors together (eps = knee of
+#   the kth-neighbour curve * dbscan_scale, min_samples = dbscan_min;
+#   unrelated to the splitter's per-tracklet DBSCAN); a trajectory flagged by
+#   either channel is an OUTLIER, and the flagged trajectories are grouped in
+#   the sidecar;
+# * ASSISTANTS FIRST, by the touchline geometry (|mean y| >= tau_a * clip max,
+#   y-std <= tau_a_sy; candidates must carry a descriptor, have NO jersey
+#   number and at least min_n sampled positions; one per side),
+#   GEOMETRY FIRST, no outlier condition on acceptance: the geometric best
+#   (largest |mean y|) wins outright when it leads the runner-up by >=
+#   a_tie_m; otherwise, over the tied set, the trajectory farthest from
+#   both 2-means centroids when none is MAD/DBSCAN-flagged, else the
+#   geometric best among the flagged (farthest among them on a second
+#   tie); a flagged winner leaves the outlier pool (geometry wins);
+# * GOALKEEPERS by penalty-area depth (q75 |x| >= PEN_X, |mean y| <= PEN_Y)
+#   AND relative depth |mean x| > gk_rel * max |mean x| over all trajectories
+#   EXCEPT the assistant referees (assistants are assigned first, which is
+#   why), with at least min_n sampled positions (candidates must carry a
+#   descriptor; EXACTLY ONE per half, no second-keeper confirmation channel),
+#   same geometry-first tie rule on depth |mean x| with margin gk_depth_m;
+# * MAIN referee = among the remaining OUTLIERS with NO jersey number and at
+#   least min_n sampled positions, those whose sampled y-range
+#   stays inside the symmetric band of the trajectory means (rule 2.14:
+#   max(y_ref) <= band * max_i(mean_y_i) and min(y_ref) >= band *
+#   min_i(mean_y_i)), the candidate closest IN APPEARANCE to the assistants;
+#   with no assistant, the outlier farthest from both k-means centroids;
+# * everyone else a player (a leftover outlier stays a player); sides: 2-means
+#   refit on the clean player descriptors, clusters named left/right by the
+#   cue chain over player mean-x (side_rule; the quantile cue averages the
+#   20 % / 80 % percentiles); a player with no descriptor takes its mean-x
+#   half (flagged fallback).
+#
+# tau_a / tau_a_sy / k / dbscan_min / dbscan_scale / band / gk_depth_m /
+# a_tie_m / min_n / gk_rel are UNTUNED on this pipeline's trajectories:
+# sweep on valid later.
 _target_: sn_gamestate.team.RoleTeamAssignment
 cfg:
-  pos_stride: 5
+  # osnet_team checkpoint -- SAME coordinates as modules/team_embed/osnet_team.yaml
+  # (the digest each stage loads is logged and recorded in its sidecar).
+  team_repo: Ynniss/osnet_team
+  team_file: osnet_team_best.pt
+  team_revision: null       # Hub revision (commit sha) to pin; null = main
+  team_sha256: null         # enforced when set; null = recorded only
+  team_local_path: null     # read the checkpoint from disk (e.g. a Kaggle dataset) instead
+  pos_stride: 5             # frames between sampled positions / crops (notebook POS_STRIDE)
+  crops_per_track: 16       # crops embedded per trajectory (notebook CROPS_PER_TRK)
+  batch_size: 128           # crops per forward pass
   audit_dir: ${project_dir}/audit/role_team
   params:
+    k: 3.25               # outlier when d > median + k * MAD (notebook's k)
+    dbscan_min: 4         # DBSCAN min_samples (one DBSCAN over all descriptors)
+    dbscan_scale: 1.5     # scale on the knee-derived DBSCAN eps
     tau_a: 0.9            # assistant: |mean y| >= tau_a * clip max |mean y|
-    tau_a_sy: 2.0         # assistant: y std must be STRICTLY below this (m)
-    tau_m: 0.30           # position margin that accepts a clustered candidate
-    confirm: outlier      # outlier (= unclustered) | geometry
+    tau_a_sy: 3.0         # assistant: max y std (m)
     side_rule: keeper     # keeper | vote (others fall back to vote)
     band: 0.9             # the symmetric 90% band of rule 2.14
-    cluster_method: kmeans2_threshold  # batch 11: recomputed on final trajectories
-    outlier_k: 3.25       # MAD multiplier of the recomputed clustering
+    gk_depth_m: 2.0       # goalkeeper geometry tie margin on depth |mean x| (m)
+    a_tie_m: 1.5          # assistant geometry tie margin on |mean y| (m)
+    min_n: 10             # min sampled SINGLE positions for assistant / GK / main candidacy (~2 s at stride 5)
+    gk_rel: 0.85          # goalkeeper: |mean x| > gk_rel * max |mean x| over non-assistant trajectories
