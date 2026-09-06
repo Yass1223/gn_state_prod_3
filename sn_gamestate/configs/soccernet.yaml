@@ -29,7 +29,7 @@
 #                  distance threshold, number conflicts resolved by maxconf; S2 =
 #                  cluster known / number unknown, agglomerative within tau; FINAL =
 #                  all S1+S2 survivors pooled, same cluster + no contradicting
-#                  numbers, within tau; clean-frame disjointness + re-enter in every
+#                  numbers, within tau; clean-frame disjointness in every
 #                  phase; centroids clean-only (multi rows are ghosts); duplicate-
 #                  frame resolution with dynamic centroids (stage 3, the ghosts' one
 #                  exception); same OSNet-AIN as track / tracklet_split; DROPS the

@@ -16,10 +16,10 @@ import numpy as np
 
 try:
     from sn_gamestate.refine.traj_refine import (
-        DIGITS_1_99, combine_cand, edge_side, pair_maxconf, ranked_labels,
+        DIGITS_1_99, combine_cand, pair_maxconf, ranked_labels,
         refine_video, score_of)
 except ImportError:                      # sandbox layout
-    from traj_refine import (DIGITS_1_99, combine_cand, edge_side,
+    from traj_refine import (DIGITS_1_99, combine_cand,
                              pair_maxconf, ranked_labels, refine_video,
                              score_of)
 
@@ -63,10 +63,9 @@ def track(cluster=None, number=None, c=None, scope=True):
     return dict(cluster=cluster, number=number, cand=c or [], scope=scope)
 
 
-def run(trajs, tracks, tau=0.6, use_reenter=True, edge_margin=0.02, img_w=W):
+def run(trajs, tracks, tau=0.6):
     E, single, frames, boxes, tids = build(*trajs)
-    return refine_video(E, single, frames, boxes, tids, tracks, img_w,
-                        tau, use_reenter, edge_margin)
+    return refine_video(E, single, frames, tids, tracks, tau)
 
 
 def check_invariants(frames_arr, new_tid):
@@ -81,12 +80,6 @@ def check_invariants(frames_arr, new_tid):
 # ---------------------------------------------------------------- helpers ----
 
 def test_helpers():
-    # nearest-side rule: a side is ALWAYS defined (no touch threshold)
-    assert edge_side([0, 0, 40, 80], W) == "left"
-    assert edge_side([W - 30, 0, 40, 80], W) == "right"
-    assert edge_side([900, 0, 40, 80], W) == "left"           # centre 920 < 960
-    assert edge_side([950, 0, 40, 80], W) == "right"          # centre 970 > 960
-    assert edge_side([0, 0, W, 80], W) == "left"              # centre = mid: ties left
     a = {"7": [math.log(0.9), 1.8, 2]}
     b = {"7": [math.log(0.5), 0.5, 1], "9": [math.log(0.8), 0.8, 1]}
     m = combine_cand(a, b)
@@ -126,44 +119,6 @@ def test_s1_needs_same_cluster():
               2: track(1.0, "7", cand(("7", .8, 4)))}
     new_tid, _, rep = run([t1, t2], tracks)
     assert set(new_tid) == {1, 2} and not rep["merges"]
-
-
-def test_s1_reenter_blocks_and_vacuous():
-    # NEAREST-SIDE rule: t1's last box is closer to the LEFT edge, t2's first
-    # box closer to the RIGHT edge -> sides differ -> set aside; the final
-    # phase cannot take the pair either (same conditions + tau, and the
-    # appearance distance here is ~1) -> two survivors.
-    t1 = rows_for(1, 0, list(range(0, 6)), x=5.0)
-    t2 = rows_for(2, 0, list(range(10, 16)), x=W - 45.0)
-    tracks = {1: track(0.0, "7", cand(("7", .9, 5))),
-              2: track(0.0, "7", cand(("7", .8, 4)))}
-    new_tid, _, rep = run([t1, t2], tracks)
-    assert set(new_tid) == {1, 2}
-    assert rep["rejected_s1"] and rep["rejected_s1"][0]["rejected"] == "reenter"
-    # mid-field boxes now carry a side too (no touch threshold): both centres
-    # in the left half -> sides MATCH -> merge proceeds
-    t1 = rows_for(1, 0, list(range(0, 6)), x=900.0)
-    t2 = rows_for(2, 1, list(range(10, 16)), x=900.0)
-    new_tid, _, _ = run([t1, t2], tracks)
-    assert set(new_tid) == {1}
-    # opposite halves without touching any edge -> sides differ -> blocked
-    t1 = rows_for(1, 0, list(range(0, 6)), x=700.0)           # centre 720: left
-    t2 = rows_for(2, 1, list(range(10, 16)), x=1200.0)        # centre 1220: right
-    new_tid, _, rep = run([t1, t2], tracks)
-    assert set(new_tid) == {1, 2}
-    assert rep["rejected_s1"][0]["exit_side"] == "left"
-    assert rep["rejected_s1"][0]["entry_side"] == "right"
-
-
-def test_reenter_interleaved_vacuous():
-    # clean frames disjoint but INTERVALS interleaved -> re-enter vacuous ->
-    # the S2 merge proceeds on cluster + tau alone, opposite halves or not.
-    t1 = rows_for(1, 0, [0, 10], x=100.0)
-    t2 = rows_for(2, 0, [5], x=1800.0)
-    tracks = {1: track(0.0, None), 2: track(0.0, None)}
-    new_tid, _, rep = run([t1, t2], tracks)
-    assert set(new_tid) == {1}
-    assert rep["merges"][0]["phase"] == "s2"
 
 
 def test_s1_overlap_conflict_second_candidate():
@@ -277,13 +232,10 @@ def test_final_pools_merged_and_unmerged():
 
 
 def test_final_same_number_pair_can_merge():
-    # an S1 pair set aside is NOT re-tried; but two same-number clusters that
-    # remained separate for a re-enter reason stay separate in the final phase
-    # too (same conditions). Covered by test_s1_reenter; here: equal numbers
-    # do not BLOCK the final phase when every condition holds -- an S1 merge
-    # happens first, so construct it via S2: not applicable. Equal numbers in
-    # the final phase arise only from set-aside S1 pairs, whose re-enter still
-    # fails. Nothing further to assert beyond test_s1_reenter.
+    # equal known numbers never BLOCK the final phase (only DIFFERENT numbers
+    # do); with no re-enter condition, every eligible same-number pair already
+    # merges in S1 (no distance threshold), so the final phase never sees two
+    # separate clusters with the same known number. Nothing to assert.
     pass
 
 
@@ -336,7 +288,7 @@ def test_stage3_clean_disjoint_multi_overlap_resolved():
     t2 = rows_for(2, 0, [3, 4, 5], singles=[True, True, True])
     tracks = {1: track(0.0, None), 2: track(0.0, None)}
     E, single, frames, boxes, tids = build(t1, t2)
-    new_tid, _, rep = refine_video(E, single, frames, boxes, tids, tracks, W, 0.6)
+    new_tid, _, rep = refine_video(E, single, frames, tids, tracks, 0.6)
     assert set(t for t in new_tid if t >= 0) == {1}
     check_invariants(frames, new_tid)
     assert rep["stage3"]["collided_frames"] == 1
@@ -352,7 +304,7 @@ def test_stage3b_dynamic_centroid_reassignment():
     t3 = rows_for(3, 1, [0, 1, 5], singles=[True, True, True])
     tracks = {1: track(0.0, None), 2: track(0.0, None), 3: track(1.0, None)}
     E, single, frames, boxes, tids = build(t1, t2, t3)
-    new_tid, _, rep = refine_video(E, single, frames, boxes, tids, tracks, W, 0.6)
+    new_tid, _, rep = refine_video(E, single, frames, tids, tracks, 0.6)
     check_invariants(frames, new_tid)
     # 1+2 merged; the ghost at frame 2 collided with t2's clean frame 2 and
     # had to go somewhere: trajectory 3 has frame 2 free but identity 1 -- the
@@ -367,7 +319,7 @@ def test_stage3_no_op_without_collisions():
     t2 = rows_for(2, 1, range(0, 5))
     tracks = {1: track(0.0, None), 2: track(1.0, None)}
     E, single, frames, boxes, tids = build(t1, t2)
-    new_tid, _, rep = refine_video(E, single, frames, boxes, tids, tracks, W, 0.6)
+    new_tid, _, rep = refine_video(E, single, frames, tids, tracks, 0.6)
     assert rep["stage3"]["held"] == 0 and rep["stage3"]["unassigned"] == 0
     assert set(new_tid) == {1, 2}
 
@@ -392,8 +344,8 @@ def test_invariants_and_determinism():
               3: track(1.0, None), 4: track(1.0, None),
               5: track(None, None)}
     E, single, frames, boxes, tids = build(t1, t2, t3, t4, t5)
-    out1 = refine_video(E, single, frames, boxes, tids, tracks, W, 0.6)
-    out2 = refine_video(E, single, frames, boxes, tids, tracks, W, 0.6)
+    out1 = refine_video(E, single, frames, tids, tracks, 0.6)
+    out2 = refine_video(E, single, frames, tids, tracks, 0.6)
     assert (out1[0] == out2[0]).all()
     check_invariants(frames, out1[0])
     assert set(t for t in out1[0] if t >= 0) >= {1, 3}

@@ -1063,15 +1063,11 @@ class RunAudit(VideoLevelModule):
             c.set(FAIL, "enabled not declared (config) or not recorded (sidecar)")
         elif bool(want_enabled) != bool(ran_enabled):
             c.set(FAIL, f"enabled that ran ({ran_enabled}) != configured ({want_enabled})")
-        for key in ("tau", "edge_margin"):
-            want, got = exp.get(key), st.get(key)
-            if want is None or got is None:
-                c.set(FAIL, f"{key} not declared (config) or not recorded (sidecar)")
-            elif abs(float(got) - float(want)) > 1e-9:
-                c.set(FAIL, f"{key} that ran ({got}) != configured ({want})")
-        want, got = exp.get("use_reenter"), st.get("use_reenter")
-        if want is not None and got is not None and bool(want) != bool(got):
-            c.set(FAIL, f"use_reenter that ran ({got}) != configured ({want})")
+        want, got = exp.get("tau"), st.get("tau")
+        if want is None or got is None:
+            c.set(FAIL, "tau not declared (config) or not recorded (sidecar)")
+        elif abs(float(got) - float(want)) > 1e-9:
+            c.set(FAIL, f"tau that ran ({got}) != configured ({want})")
 
         enabled = bool(ran_enabled)
         tid_now, tid_pre = det["track_id"], det["track_id_prerefine"]
@@ -1136,7 +1132,6 @@ class RunAudit(VideoLevelModule):
         c.observed.update(tracklets_before=n_trk_pre, tracklets_after=n_trk_now,
                           merges=n_merges, merges_s1=n_s1, merges_s2=n_s2,
                           merges_final=n_fin, conflicts=outp.get("conflicts"),
-                          rejected_s1=outp.get("rejected_s1"),
                           partition=data.get("partition"),
                           no_centroid=len(data.get("no_centroid") or []),
                           out_of_scope=data.get("out_of_scope"))

@@ -68,15 +68,9 @@ cfg:
   # this stage on any validation split yet.
   tau: 0.60
 
-  # Re-enter condition (C3), NEAREST-SIDE rule: when one trajectory ends before
-  # the other begins, the earlier one's exit side is the lateral image edge its
-  # last single box is CLOSER to, the later one's entry side the edge its first
-  # single box is closer to; the sides must match. A side is always defined --
-  # there is no touch threshold; edge_margin is accepted for compatibility and
-  # unused.
-  use_reenter: true
-  edge_margin: 0.02
-
+  # There is NO re-enter condition: time-disjoint same-cluster fragments face
+  # only the label and distance conditions above.
+  #
   # NOTE: the two-different-assistants rule (two trajectories satisfying the
   # assistant conditions with opposite mean-y signs, close in appearance) is
   # NOT a merge condition -- it is decided by the role_team stage on the

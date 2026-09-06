@@ -20,20 +20,19 @@ module supplies its inputs and applies its output:
    stats). Every fragment is in scope -- there is no role to exempt anyone.
 3. Chronology: the dataset's frame index (``team_embed_api.frame_index``), so
    frame equality and time order are the dataset's, not ``image_id`` order.
-   The image width for the re-enter test is read off the first frame the
-   feature extraction loads.
 4. Refine, in THREE PHASES over a partition of the fragments by label
    knowledge (S1: cluster AND number known; S2: cluster known, number
    unknown; a fragment with no cluster id never merges). Phase S1: within
-   S1, same-cluster same-number merges under clean-frame disjointness and
-   re-enter consistency, NO distance threshold; overlap conflicts resolved
+   S1, same-cluster same-number merges under clean-frame disjointness,
+   NO distance threshold; overlap conflicts resolved
    by maxconf, the loser walking down its candidate list (an unnumbered
    loser joins S2). Phase S2: within S2, agglomerative merging under equal
-   cluster, clean-frame disjointness and re-enter, distance <= ``tau``.
+   cluster and clean-frame disjointness, distance <= ``tau``.
    Final phase: over ALL S1 and S2 survivors, merged and unmerged alike,
-   agglomerative under clean-frame disjointness, re-enter, SAME cluster id
+   agglomerative under clean-frame disjointness, SAME cluster id
    and no contradicting numbers (two different known numbers never merge),
-   distance <= ``tau``. Multi-crop detections are ghosts throughout: no
+   distance <= ``tau``. There is NO re-enter condition: time-disjoint
+   same-cluster fragments face only the label and distance conditions. Multi-crop detections are ghosts throughout: no
    centroid, no condition -- they follow their fragment (their one
    exception is stage 3). The two-different-assistants rule (opposite
    touchlines, close in appearance) is NOT a merge condition: it lives in
@@ -123,14 +122,9 @@ class TrajRefine(VideoLevelModule):
         self.device = device
         self.enabled = bool(getattr(cfg, "enabled", True))
         self.tau = float(cfg.tau)
-        self.use_reenter = bool(getattr(cfg, "use_reenter", True))
-        self.edge_margin = float(getattr(cfg, "edge_margin", 0.02))
         self.batch_size = int(getattr(cfg, "batch_size", 64))
         if not (0.0 <= self.tau <= 2.0):
             raise ValueError(f"[traj_refine] tau must be in [0, 2], got {self.tau}")
-        if not (0.0 <= self.edge_margin < 0.5):
-            raise ValueError(f"[traj_refine] edge_margin must be in [0, 0.5), "
-                             f"got {self.edge_margin}")
         self.audit_dir = Path(str(cfg.audit_dir)) if getattr(cfg, "audit_dir", None) else None
         if self.audit_dir:
             self.audit_dir.mkdir(parents=True, exist_ok=True)
@@ -138,8 +132,7 @@ class TrajRefine(VideoLevelModule):
         # pin mismatch against tracklet_split is a run-audit FAIL. Built lazily
         # so a disabled stage costs nothing.
         self._embedder = None
-        log.info(f"[traj_refine] enabled {self.enabled}, tau {self.tau}, "
-                 f"use_reenter {self.use_reenter} (nearest side); "
+        log.info(f"[traj_refine] enabled {self.enabled}, tau {self.tau}; "
                  f"labels = team cluster + jersey number (roles/sides are assigned "
                  f"after this stage)")
 
@@ -203,9 +196,6 @@ class TrajRefine(VideoLevelModule):
                 f"all-zero appearance feature - the appearance model or the frame "
                 f"paths are broken; refusing to merge trajectories on empty "
                 f"embeddings.")
-        if img_w is None and self.use_reenter:
-            log.warning("[traj_refine] no frame could be read; the re-enter "
-                        "condition is vacuous for this sequence")
         return feats, img_w
 
     # --------------------------------------------------------------- tracks --
@@ -249,15 +239,12 @@ class TrajRefine(VideoLevelModule):
             out["jersey_number_maxconf"] = 0.0
 
         record = dict(sequence=seq, ran=False,
-                      settings=dict(enabled=self.enabled, tau=self.tau,
-                                    use_reenter=self.use_reenter,
-                                    edge_margin=self.edge_margin),
+                      settings=dict(enabled=self.enabled, tau=self.tau),
                       embedder=None,
                       inputs=dict(detections=int(len(detections)), tracked=0,
                                   tracklets=0),
                       outputs=dict(tracklets=0, merges=0, merges_s1=0,
                                    merges_s2=0, merges_final=0, conflicts=0,
-                                   rejected_s1=0,
                                    rows_relabelled=0, rows_unassigned=0,
                                    frame_collisions=0,
                                    team_embedding_dropped=False))
@@ -296,15 +283,12 @@ class TrajRefine(VideoLevelModule):
             raise RuntimeError(f"[traj_refine] {seq}: detection image_id without "
                                f"frame metadata")
         frames = frames.astype(np.int64)
-        boxes = np.stack([np.asarray(b, dtype=np.float64)
-                          for b in work["bbox_ltwh"]])
         single = work["crop_single"].astype(bool).to_numpy()
         tracks = self._track_info(work, record)
-        feats, img_w = self._extract_features(work, metadatas, record)
+        feats, _ = self._extract_features(work, metadatas, record)
 
         new_tid, resolved, rep = tr.refine_video(
-            feats, single, frames, boxes, work["_tid"].to_numpy(), tracks,
-            img_w, self.tau, self.use_reenter, self.edge_margin)
+            feats, single, frames, work["_tid"].to_numpy(), tracks, self.tau)
         record["ran"] = True
 
         # ----------------------------------------------------------- apply --
@@ -362,9 +346,7 @@ class TrajRefine(VideoLevelModule):
         merges_final = sum(1 for m in rep["merges"] if m["phase"] == "final")
         record["partition"] = dict(rep["partition"])
         record["phase_s1"] = dict(merges=merges_s1, conflicts=len(rep["conflicts"]),
-                                  rejected=len(rep["rejected_s1"]),
                                   conflict_log=rep["conflicts"],
-                                  rejected_log=rep["rejected_s1"],
                                   clusters_after=rep["clusters_after_s1"])
         record["phase_s2"] = dict(merges=merges_s2,
                                   clusters_after=rep["clusters_after_s2"])
@@ -377,7 +359,7 @@ class TrajRefine(VideoLevelModule):
             tracklets=int(tracked_out["track_id"].nunique()),
             merges=len(rep["merges"]), merges_s1=merges_s1, merges_s2=merges_s2,
             merges_final=merges_final,
-            conflicts=len(rep["conflicts"]), rejected_s1=len(rep["rejected_s1"]),
+            conflicts=len(rep["conflicts"]),
             rows_relabelled=int(n_relabel), rows_unassigned=n_unassigned,
             frame_collisions=coll, clusters_incoherent=n_incoherent)
         record["per_cluster"] = [
@@ -393,7 +375,6 @@ class TrajRefine(VideoLevelModule):
                  f"(partition {rep['partition']}; {merges_s1} S1 + {merges_s2} S2 "
                  f"+ {merges_final} final merges, "
                  f"{len(rep['conflicts'])} number conflict(s) resolved, "
-                 f"{len(rep['rejected_s1'])} S1 pair(s) rejected, "
                  f"{len(rep['no_centroid'])} without a centroid, "
                  f"{rep['out_of_scope']} out of scope; stage 3: "
                  f"{rep['stage3']['held']} held, {rep['stage3']['placed']} placed, "

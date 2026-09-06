@@ -2,14 +2,14 @@
 
 Runs AFTER ``team_embed`` and ``jersey_number_detect`` and BEFORE ``role_team``,
 on the splitter's fragments: the pipeline's ONE merge, deciding on the team
-CLUSTER id (``team_embed``), the jersey number with its pooled maxconf
-candidate statistics (``jn_gsr_api``) and exit/entry geometry. Team sides and
+CLUSTER id (``team_embed``) and the jersey number with its pooled maxconf
+candidate statistics (``jn_gsr_api``). Team sides and
 roles do not exist yet -- they are assigned after this stage, on the finished
 trajectories. Every fragment is in scope: there is no role to exempt anyone.
 
 GHOST RULE. Multi-player (non-``crop_single``) detections take no part in any
-merge condition: they are absent from the clean-frame disjointness test, from
-the re-enter anchors, and from every centroid (centroids are means over CLEAN
+merge condition: they are absent from the clean-frame disjointness test and
+from every centroid (centroids are means over CLEAN
 non-zero detections ONLY -- there is no fallback to multi rows; a cluster
 without such a detection has no centroid and never merges on appearance).
 Ghost rows simply follow their fragment through every merge. The ONE place
@@ -23,7 +23,6 @@ Inputs, per video (aligned arrays, one entry per TRACKED detection):
     single   (n,)  bool, the crop filter's ``crop_single`` label
     frames   (n,)  int, CHRONOLOGICAL frame index (the dataset's ``frame``
              column; equality == same frame, order == time order)
-    boxes    (n, 4) float, ``bbox_ltwh`` in image space (for the re-enter test)
     tids     (n,)  int, the trajectory id each row carries when the stage runs
 
     tracks   {tid: dict(cluster, number, cand, scope)} per-fragment labels:
@@ -31,7 +30,6 @@ Inputs, per video (aligned arrays, one entry per TRACKED detection):
              None; ``number`` a digit string or None; ``cand`` the jersey
              stage's pooled candidate list ``[[label, mx, conf_sum, votes],
              ...]``; ``scope`` bool (always True in this pipeline)
-    img_w    image width in pixels, or None (re-enter checks become vacuous)
 
 Jersey confidence model (the maxconf consolidation rule): a trajectory's score
 for label L is ``exp(mx(L)) * conf_sum(L)`` over the pooled frame decodes of
@@ -50,10 +48,8 @@ Phase S1 -- within S1, label-driven, NO distance threshold.  All pairs with
 EQUAL cluster and EQUAL number are processed in descending order of the pair's
 JOINT pooled maxconf (``exp(max(mx_F, mx_G)) * (conf_sum_F + conf_sum_G)``):
 
-  * CLEAN frame sets disjoint AND re-enter consistent -> MERGE (appearance
-    plays no role: the two labels together already identify one player);
-  * clean frame sets disjoint but re-enter fails -> the pair is set aside
-    (re-examined if either side later changes through a merge);
+  * CLEAN frame sets disjoint -> MERGE (appearance plays no role: the two
+    labels together already identify one player);
   * clean frame sets overlap -> two trajectories claiming one shirt at the
     same time: the one with the LOWER maxconf for that number is reassigned to
     its best-ranked candidate not yet lost in a conflict (labels it lost on
@@ -61,27 +57,19 @@ JOINT pooled maxconf (``exp(max(mx_F, mx_G)) * (conf_sum_F + conf_sum_G)``):
     list); a non-digit best candidate ("-1", or nothing left) leaves it
     unnumbered -- it then LEAVES S1 and joins S2 for the next phase.
     The loop re-derives the pair set until no eligible pair remains, and
-    terminates because every action either removes a cluster (merge), shrinks
-    a candidate list's unbanned prefix (conflict), or grows the set-aside set
-    (reject).
+    terminates because every action either removes a cluster (merge) or
+    shrinks a candidate list's unbanned prefix (conflict).
 
 Phase S2 -- within S2 (including any fragment demoted from S1), agglomerative
 average-linkage merging (group distance = 1 minus the dot product of the two
 mean unit vectors over clean detections). Compatible(F, G) holds iff the
-clusters are EQUAL, the CLEAN frame sets are disjoint and the re-enter
-condition holds; the closest compatible pair merges while its distance <= tau.
+clusters are EQUAL and the CLEAN frame sets are disjoint; the closest
+compatible pair merges while its distance <= tau.
 
 Phase FINAL -- over ALL S1 and S2 survivors together, merged and unmerged
 alike, agglomerative as in S2. Compatible(F, G) holds iff ALL of:
 
     C2  time overlap: the CLEAN frame sets are disjoint;
-    C3  re-enter (nearest-side rule): when one cluster ends before the other
-        begins, the earlier cluster's EXIT side is the lateral image edge its
-        last single box is CLOSER to, and the later cluster's ENTRY side is
-        the edge its first single box is closer to; the two sides must be
-        equal. With interleaved intervals (or no image width) the condition
-        is vacuous. There is no touch threshold: every ordered pair has a
-        defined side (``edge_margin`` is accepted for compatibility, unused);
     C4  SAME cluster id (both are known by construction of the partition);
     C5  numbers: two DIFFERENT known numbers never merge (a numbered and an
         unnumbered cluster may).
@@ -167,21 +155,11 @@ def ranked_labels(cand):
                   reverse=True)
 
 
-def edge_side(box, img_w, margin_px=None):
-    """The lateral image edge the box is CLOSER to: 'left' when its centre
-    sits in the left half of the image (ties to 'left'), else 'right'.
-    ``margin_px`` is accepted for compatibility and unused -- the
-    nearest-side rule has no touch threshold, so a side is always defined."""
-    l, _, w, _ = (float(v) for v in box)
-    return "left" if l + w * 0.5 <= img_w * 0.5 else "right"
-
-
 class _Cluster:
     """Mutable merge state of one (possibly merged) trajectory."""
 
     __slots__ = ("tids", "rows", "sum_clean", "n_clean", "clean_frames",
-                 "cluster", "number", "cand", "scope", "first_row", "last_row",
-                 "banned")
+                 "cluster", "number", "cand", "scope", "banned")
 
     def __init__(self, tid, rows, E, single, frames, info):
         self.tids = [int(tid)]
@@ -194,13 +172,6 @@ class _Cluster:
         fr = np.asarray(frames, dtype=np.int64)[self.rows]
         sr = np.asarray(single, dtype=bool)[self.rows]
         self.clean_frames = set(int(x) for x in fr[sr])
-        # re-enter anchors: SINGLE rows only (ghosts enter no condition); the
-        # all-rows fallback exists only for clusters with no single row, which
-        # carry no cluster id and never merge -- the anchor is then unused.
-        anchor = self.rows[sr] if sr.any() else self.rows
-        afr = np.asarray(frames, dtype=np.int64)[anchor]
-        self.first_row = int(anchor[int(np.argmin(afr))])
-        self.last_row = int(anchor[int(np.argmax(afr))])
         cl = info.get("cluster")
         self.cluster = None if cl is None or (isinstance(cl, float) and np.isnan(cl)) else float(cl)
         number = info.get("number")
@@ -222,19 +193,12 @@ class _Cluster:
             return self.sum_clean / self.n_clean
         return None
 
-    def first_last(self, frames):
-        return int(frames[self.first_row]), int(frames[self.last_row])
-
     def absorb(self, other, frames):
         self.tids += other.tids
         self.rows = np.concatenate([self.rows, other.rows])
         self.sum_clean += other.sum_clean
         self.n_clean += other.n_clean
         self.clean_frames |= other.clean_frames
-        if int(frames[other.first_row]) < int(frames[self.first_row]):
-            self.first_row = other.first_row
-        if int(frames[other.last_row]) > int(frames[self.last_row]):
-            self.last_row = other.last_row
         self.cluster = self.cluster if self.cluster is not None else other.cluster
         self.number = self.number or other.number
         self.cand = combine_cand(self.cand, other.cand)
@@ -250,30 +214,6 @@ def _dist(a, b):
     return 1.0 - float(ca @ cb)
 
 
-def _reenter_ok(a, b, frames, boxes, img_w, margin_frac, record=None):
-    """C3, nearest-side rule. Vacuous only for interleaved intervals (or no
-    image width): when one cluster ends strictly before the other begins, the
-    earlier cluster's exit side (the lateral edge its last single box is
-    closer to) must equal the later cluster's entry side (the edge its first
-    single box is closer to). ``margin_frac`` is unused (kept for the call
-    signature)."""
-    if img_w is None:
-        return True
-    fa, la = a.first_last(frames)
-    fb, lb = b.first_last(frames)
-    if la < fb:
-        earlier, later = a, b
-    elif lb < fa:
-        earlier, later = b, a
-    else:
-        return True                     # interleaved intervals: vacuous
-    exit_side = edge_side(boxes[earlier.last_row], img_w)
-    entry_side = edge_side(boxes[later.first_row], img_w)
-    if record is not None:
-        record.update(exit_side=exit_side, entry_side=entry_side)
-    return exit_side == entry_side
-
-
 def _in_s1(c):
     return c.scope and c.cluster is not None and c.number is not None
 
@@ -284,12 +224,10 @@ def _in_s2(c):
 
 # ------------------------------------------------------------------ phase S1
 
-def _phase_s1(clusters, frames, boxes, img_w, use_reenter, edge_margin,
-              report):
+def _phase_s1(clusters, frames, report):
     """Same-cluster same-number merges and overlap conflict resolution within
     S1; NO distance threshold. Mutates ``clusters`` (dict key -> cluster).
     See the module docstring."""
-    aside = set()               # pair keys set aside on a re-enter reject
     while True:
         live = sorted(clusters)
         pairs = []
@@ -302,8 +240,6 @@ def _phase_s1(clusters, frames, boxes, img_w, use_reenter, edge_margin,
                 if not _in_s1(b) or b.number != a.number:
                     continue
                 if b.cluster != a.cluster:
-                    continue
-                if (ka, kb) in aside:
                     continue
                 sc = pair_maxconf(a.cand, b.cand, a.number)
                 pairs.append((sc, ka, kb))
@@ -319,17 +255,9 @@ def _phase_s1(clusters, frames, boxes, img_w, use_reenter, edge_margin,
                      cluster=a.cluster, pair_maxconf=round(sc, 6))
         d = _dist(a, b)
         entry["distance"] = None if not np.isfinite(d) else round(d, 4)
-        ok_re = (not use_reenter) or _reenter_ok(a, b, frames, boxes, img_w,
-                                                 edge_margin, entry)
-        if ok_re:
-            a.absorb(b, frames)
-            del clusters[kb]
-            aside = {p for p in aside if ka not in p and kb not in p}
-            report["merges"].append(entry)
-        else:
-            entry["rejected"] = "reenter"
-            report["rejected_s1"].append(entry)
-            aside.add((ka, kb))
+        a.absorb(b, frames)
+        del clusters[kb]
+        report["merges"].append(entry)
 
 
 def _resolve_conflict(a, b, pair_mc, report):
@@ -400,27 +328,22 @@ def _agglomerate(clusters, member, compat, frames, tau, phase, report):
                 D[i, m] = D[m, i] = v
 
 
-def _phase_s2(clusters, frames, boxes, img_w, tau, use_reenter, edge_margin,
-              report):
+def _phase_s2(clusters, frames, tau, report):
     """Agglomerative merging within S2 (cluster known, number unknown --
-    including fragments demoted from S1): same cluster + C2 + C3 and tau."""
+    including fragments demoted from S1): same cluster + C2 and tau."""
     def compat(a, b):
         if a.cluster != b.cluster:            # both known (S2 membership)
             return False
         if a.clean_frames & b.clean_frames:
-            return False
-        if use_reenter and not _reenter_ok(a, b, frames, boxes, img_w,
-                                           edge_margin):
             return False
         return True
 
     _agglomerate(clusters, _in_s2, compat, frames, tau, "s2", report)
 
 
-def _phase_final(clusters, frames, boxes, img_w, tau, use_reenter,
-                 edge_margin, report):
+def _phase_final(clusters, frames, tau, report):
     """Agglomerative merging over ALL S1 and S2 survivors together:
-    C2 + C3 + same cluster (C4) + no contradicting numbers (C5) and tau."""
+    C2 + same cluster (C4) + no contradicting numbers (C5) and tau."""
     def member(c):
         return c.scope and c.cluster is not None
 
@@ -432,9 +355,6 @@ def _phase_final(clusters, frames, boxes, img_w, tau, use_reenter,
             return False
         if a.clean_frames & b.clean_frames:   # C2
             return False
-        if use_reenter and not _reenter_ok(a, b, frames, boxes, img_w,
-                                           edge_margin):
-            return False                      # C3
         return True
 
     _agglomerate(clusters, member, compat, frames, tau, "final", report)
@@ -542,8 +462,7 @@ def _stage3(clusters, E, single, frames, new_tid, report):
 
 # ------------------------------------------------------------------ driver
 
-def refine_video(E, single, frames, boxes, tids, tracks, img_w,
-                 tau, use_reenter=True, edge_margin=0.02):
+def refine_video(E, single, frames, tids, tracks, tau):
     """Whole method for one video.
 
     Returns ``(new_tid_of_row, resolved, report)``:
@@ -555,28 +474,24 @@ def refine_video(E, single, frames, boxes, tids, tracks, img_w,
       the number's share of the cluster's pooled frame votes (the jersey
       stage's definition, extended to combined clusters), ``maxconf`` its
       combined maxconf score; both 0.0 with no number;
-    * ``report`` -- merges (with their phase), conflicts, S1 rejections,
-      partition counts and stage-3 counts for the audit sidecar.
+    * ``report`` -- merges (with their phase), conflicts, partition counts
+      and stage-3 counts for the audit sidecar.
     """
     E = np.asarray(E, dtype=np.float32)
     single = np.asarray(single, dtype=bool)
     frames = np.asarray(frames, dtype=np.int64)
-    boxes = np.asarray(boxes, dtype=np.float64)
     tids = np.asarray(tids, dtype=np.int64)
     n = len(E)
-    if not (len(single) == len(frames) == len(tids) == n and boxes.shape == (n, 4)):
-        raise ValueError("E, single, frames, boxes and tids must have one entry "
+    if not (len(single) == len(frames) == len(tids) == n):
+        raise ValueError("E, single, frames and tids must have one entry "
                          "per detection")
     tau = float(tau)
     if not (0.0 <= tau <= 2.0):
         raise ValueError(f"tau must be in [0, 2], got {tau}")
-    edge_margin = float(edge_margin)
-    if not (0.0 <= edge_margin < 0.5):
-        raise ValueError(f"edge_margin must be in [0, 0.5), got {edge_margin}")
 
-    report = dict(merges=[], conflicts=[], rejected_s1=[],
+    report = dict(merges=[], conflicts=[],
                   clusters_in=0, clusters_out=0, out_of_scope=0,
-                  no_centroid=[], img_w=img_w)
+                  no_centroid=[])
     clusters = {}
     for tid in np.unique(tids):
         rows = np.where(tids == tid)[0]
@@ -594,14 +509,11 @@ def refine_video(E, single, frames, boxes, tids, tracks, img_w,
         unclustered=sum(1 for c in clusters.values()
                         if c.scope and c.cluster is None))
 
-    _phase_s1(clusters, frames, boxes, img_w, use_reenter, edge_margin,
-              report)
+    _phase_s1(clusters, frames, report)
     report["clusters_after_s1"] = len(clusters)
-    _phase_s2(clusters, frames, boxes, img_w, tau, use_reenter, edge_margin,
-              report)
+    _phase_s2(clusters, frames, tau, report)
     report["clusters_after_s2"] = len(clusters)
-    _phase_final(clusters, frames, boxes, img_w, tau, use_reenter,
-                 edge_margin, report)
+    _phase_final(clusters, frames, tau, report)
     report["clusters_out"] = len(clusters)
 
     new_tid = np.full(n, -2, dtype=np.int64)
