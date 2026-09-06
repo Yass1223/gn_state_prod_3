@@ -6,9 +6,11 @@
 # and are NOT read here): this stage recomputes appearance ITSELF from the
 # clean (single) crops of each trajectory.
 #
-# GHOST RULE: every statistic, every candidate condition and the written
-# labels use SINGLE (crop_single) detections only. Multi-crop rows contribute
-# nothing and RECEIVE nothing -- role/team stay empty on them.
+# GHOST RULE (computation): every statistic, every candidate condition and the
+# appearance descriptor use SINGLE (crop_single) detections only. Multi-crop
+# rows contribute nothing to any decision; once the trajectory's role and team
+# are decided they are WRITTEN on all of its rows (single and multi), so the
+# final trajectories are fully labelled for the evaluation and the display.
 #
 # Rules (sn_gamestate/team/role_team_api.py):
 # * one appearance descriptor per trajectory (osnet_team on <= crops_per_track

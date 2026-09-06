@@ -37,8 +37,8 @@
 #                  jersey evidence only; team_cluster* kept as inert snapshots)
 #                  -> track_id (trajectories), track_id_prerefine + jersey/cluster snapshots
 #   role_team      per-TRAJECTORY roles and sides, AFTER the merge, recomputed from
-#                  CLEAN crops (all statistics over SINGLE rows; labels WRITTEN on
-#                  single rows only): osnet_team descriptors per trajectory; outliers by
+#                  CLEAN crops (all statistics over SINGLE rows; the decided labels
+#                  WRITTEN on all rows of the trajectory): osnet_team descriptors per trajectory; outliers by
 #                  2-means + MAD rule and a trajectory-level DBSCAN (unrelated to the
 #                  splitter's); assistants FIRST (no jersey number, min_n positions),
 #                  geometry-first; goalkeepers geometry + depth > gk_rel * max

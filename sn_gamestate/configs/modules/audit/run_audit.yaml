@@ -29,9 +29,10 @@
 # merge -- sidecar: checkpoint digest that ran vs configured, empty/zero
 # embeddings, off-grid tracklets, clustering counts; with kmeans2_nearest every
 # embedded fragment is clustered), role_team (valid role on
-# every tracked SINGLE row, none on multi rows -- labels are applied to single
-# crops only -- team on every single player/keeper row, none on referees,
-# per-track constancy over single rows,
+# every tracked row -- roles/teams decided from each trajectory's single
+# detections only and written on all of its rows --
+# team on every player/keeper row, none on referees,
+# per-track constancy,
 # sidecar: parameters that ran vs configured, referee/assistant/keeper
 # caps, outlier group vs the per-trajectory flags, half-fallback count -- the
 # stage recomputes appearance from clean crops), jersey_number_detect

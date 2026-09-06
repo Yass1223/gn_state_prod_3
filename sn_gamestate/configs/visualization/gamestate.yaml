@@ -7,6 +7,9 @@ save_videos: True
 # Professional inference display: predictions only.
 #   * one bounding box per player, team color, single-line tag "JN | ID" above the box
 #   * ONE radar (minimap) panel, bottom-centre, low transparency — no ground-truth twin
+#   * role/team are decided per trajectory from its single crops and written on all
+#     of its rows, so multi-crop detections draw in the trajectory's colour like any
+#     other row — trajectories render continuously through overlaps
 # The old Pitch visualizer (predicted line overlay) is removed: BroadTrack emits camera
 # parameters directly and produces no `lines` image column, so it drew nothing here.
 visualizers:

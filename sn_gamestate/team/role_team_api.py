@@ -8,9 +8,12 @@ clusters are gone by this point (``traj_refine`` drops ``team_embedding``;
 NOT read here): this stage recomputes appearance itself, from the CLEAN
 (single) crops of each finished trajectory.
 
-Per sequence (GHOST RULE: every statistic, every candidate condition and the
-written labels use SINGLE (``crop_single``) detections only; multi-crop rows
-contribute nothing and receive nothing):
+Per sequence (GHOST RULE, computation side: every statistic and every
+candidate condition uses SINGLE (``crop_single``) detections only; multi-crop
+rows contribute nothing to any decision. Once a trajectory's role and team are
+decided, they are written to ALL of its detections -- single and multi alike --
+so the final trajectories are fully labelled for the evaluation metrics and
+the visualization):
 
 1. Geometry statistics per trajectory over its SINGLE detections: mean/std of
    x and y, the 75th percentile of |x| (goal-depth cue), the sampled y-range,
@@ -84,10 +87,10 @@ contribute nothing and receive nothing):
    half (a flagged fallback). Goalkeepers take the side of their half;
    referees have no side.
 
-Columns written on every tracked SINGLE row: ``role`` in {player,
-goalkeeper, referee}; ``team`` in {left, right} (None for referees).
-Multi-crop rows keep ``role``/``team`` None: labels are applied to single
-crops only. Sidecar
+Columns written on EVERY tracked row of the trajectory: ``role`` in {player,
+goalkeeper, referee}; ``team`` in {left, right} (None for referees). The
+labels are decided per trajectory from its single detections and then applied
+to all of its rows. Sidecar
 ``<audit_dir>/<sequence>.json``: per-trajectory role/why/team/outlier
 flags, the outlier group, sequence-level naming cues, the (2.14) band, the
 embedder provenance, and counts; the run audit reads it.
@@ -230,8 +233,9 @@ class RoleTeamAssignment(VideoLevelModule):
         log.info(f"[role_team] per-trajectory roles and sides AFTER traj_refine, "
                  f"recomputed from clean crops (osnet_team + 2-means/MAD + DBSCAN); "
                  f"assistants first (no jersey number), main referee no-number, "
-                 f"goalkeeper depth > gk_rel * max non-assistant |mean x|; labels "
-                 f"written on single rows only; params {self.params}")
+                 f"goalkeeper depth > gk_rel * max non-assistant |mean x|; computed "
+                 f"from single rows, written on all rows of the trajectory; "
+                 f"params {self.params}")
 
     def _model(self):
         if self.model is None:
@@ -559,13 +563,15 @@ class RoleTeamAssignment(VideoLevelModule):
                     why[j] = "player_half_fallback"
                 team[j] = "left" if (np.isfinite(mx[j]) and mx[j] < 0) else "right"
 
-        # --- apply + sidecar (labels on SINGLE rows only: the ghost rule) --
+        # --- apply + sidecar: the trajectory's labels go on ALL its rows --
+        # (decided from single detections only -- the ghost rule governs the
+        # computation; membership governs the write)
         single_col = out["crop_single"].astype(bool) if "crop_single" in out.columns \
             else pd.Series(True, index=out.index)
-        n_multi_unlabelled = 0
+        n_multi_labelled = 0
         for j, t in enumerate(T):
-            sel = (out["track_id"] == t["tid"]) & single_col
-            n_multi_unlabelled += int(((out["track_id"] == t["tid"]) & ~single_col).sum())
+            sel = out["track_id"] == t["tid"]
+            n_multi_labelled += int((sel & ~single_col).sum())
             out.loc[sel, "role"] = role[j]
             out.loc[sel, "team"] = team[j]
             record["per_trajectory"].append(dict(
@@ -582,7 +588,7 @@ class RoleTeamAssignment(VideoLevelModule):
             named_left_cluster=int(left), cues=cues,
             band=[_f(band_lo), _f(band_hi)],
             gk_depth_ref=_f(gk_depth_ref),
-            n_multi_rows_unlabelled=int(n_multi_unlabelled),
+            n_multi_rows_labelled=int(n_multi_labelled),
             main_referee=(T[main_ref]["tid"] if main_ref is not None else None),
             main_referee_rule=main_rule,
             dbscan_eps=_f(eps), dbscan=dbscan_rec,

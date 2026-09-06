@@ -1380,12 +1380,12 @@ class RunAudit(VideoLevelModule):
         after traj_refine and is the last labelling stage, so the live columns
         grouped by the final ids ARE its output -- no snapshots needed)."""
         c = Check("role_team (per-trajectory roles + sides, after traj_refine)",
-                  "every tracked SINGLE row has a role in {player, goalkeeper, referee}; "
-                  "multi rows carry NO role and NO team (labels are applied to single "
-                  "crops only); single players "
+                  "every tracked row has a role in {player, goalkeeper, referee} -- "
+                  "roles and teams are DECIDED from each trajectory's single "
+                  "detections only and WRITTEN on all of its rows, so multi rows "
+                  "carry their trajectory's labels; players "
                   "and goalkeepers have team in {left, right}, referees none; role and "
-                  "team constant over each trajectory's single rows; at most one main "
-                  "referee, one "
+                  "team constant per trajectory; at most one main referee, one "
                   "assistant per side and one goalkeeper per half (algorithm "
                   "invariants); parameters that ran equal "
                   "the configured ones (appearance recomputed from clean crops: 2-means "
@@ -1399,39 +1399,38 @@ class RunAudit(VideoLevelModule):
         if c.verdict == FAIL:
             return c
         sing_mask = tracked["crop_single"].astype(bool)
-        t_single = tracked[sing_mask]
         t_multi = tracked[~sing_mask]
-        role = t_single["role"]
+        role = tracked["role"]
         bad_role = int((~role.isin(["player", "goalkeeper", "referee"])).sum())
-        c.observed["single_rows_without_valid_role"] = bad_role
+        c.observed["rows_without_valid_role"] = bad_role
         if bad_role:
-            c.set(FAIL, f"{bad_role} tracked SINGLE rows without a valid role")
-        # ghost rule: multi rows receive no labels from this stage
+            c.set(FAIL, f"{bad_role} tracked rows without a valid role")
+        # the trajectory's labels reach its multi rows too (decided from
+        # singles, written on all rows); a bare multi row would surface above
+        # as an invalid role and below as per-track variance
         m_role = int(t_multi["role"].notna().sum()) if len(t_multi) else 0
-        m_team = int(t_multi["team"].notna().sum()) if len(t_multi) else 0
         c.observed.update({"multi_rows": int(len(t_multi)),
-                           "multi_rows_with_role": m_role,
-                           "multi_rows_with_team": m_team})
-        if m_role or m_team:
-            c.set(FAIL, f"{m_role} multi row(s) carry a role and {m_team} a team; "
-                        f"labels are applied to single crops only")
-        pg = t_single[role.isin(["player", "goalkeeper"])]
+                           "multi_rows_with_role": m_role})
+        if len(t_multi) and m_role != len(t_multi):
+            c.set(FAIL, f"{len(t_multi) - m_role} multi row(s) carry no role; "
+                        f"the trajectory's labels go on all of its rows")
+        pg = tracked[role.isin(["player", "goalkeeper"])]
         has = pg["team"].isin(["left", "right"])
         c.observed.update({"player_gk_rows": int(len(pg)), "rows_missing_team": int((~has).sum()),
                            "left_tracklets": int(pg[pg["team"] == "left"]["track_id"].nunique()),
                            "right_tracklets": int(pg[pg["team"] == "right"]["track_id"].nunique()),
-                           "referee_tracklets": int(t_single[role == "referee"]["track_id"].nunique()),
-                           "goalkeeper_tracklets": int(t_single[role == "goalkeeper"]["track_id"].nunique())})
+                           "referee_tracklets": int(tracked[role == "referee"]["track_id"].nunique()),
+                           "goalkeeper_tracklets": int(tracked[role == "goalkeeper"]["track_id"].nunique())})
         if len(pg) and int((~has).sum()):
-            c.set(FAIL, f"{int((~has).sum())} player/GK single rows without team")
-        ref_team = int(t_single[(role == "referee") & t_single["team"].isin(["left", "right"])].shape[0])
+            c.set(FAIL, f"{int((~has).sum())} player/GK rows without team")
+        ref_team = int(tracked[(role == "referee") & tracked["team"].isin(["left", "right"])].shape[0])
         if ref_team:
             c.set(FAIL, f"{ref_team} referee rows carry a team")
         for col in ("role", "team"):
-            bad = self._per_track_constant(t_single, col)
+            bad = self._per_track_constant(tracked, col)
             c.observed[f"{col}_inconsistent_tracks"] = len(bad)
             if bad:
-                c.set(FAIL, f"{col} varies within {len(bad)} trajectories (single rows)")
+                c.set(FAIL, f"{col} varies within {len(bad)} trajectories")
         data = self._read_sidecar(self.role_team_sidecar_dir, seq)
         c.observed["sidecar"] = str(self.role_team_sidecar_dir / f"{seq}.json") if self.role_team_sidecar_dir else None
         if data is None:
@@ -1469,10 +1468,10 @@ class RunAudit(VideoLevelModule):
                            "n_no_embedding": lvl.get("n_no_embedding"),
                            "n_fallback_half": lvl.get("n_fallback_half"),
                            "gk_depth_ref": lvl.get("gk_depth_ref"),
-                           "n_multi_rows_unlabelled": lvl.get("n_multi_rows_unlabelled")})
-        if lvl.get("n_multi_rows_unlabelled") is not None \
-                and int(lvl["n_multi_rows_unlabelled"]) != int(len(t_multi)):
-            c.set(FAIL, f"sidecar reports {lvl['n_multi_rows_unlabelled']} unlabelled "
+                           "n_multi_rows_labelled": lvl.get("n_multi_rows_labelled")})
+        if lvl.get("n_multi_rows_labelled") is not None \
+                and int(lvl["n_multi_rows_labelled"]) != int(len(t_multi)):
+            c.set(FAIL, f"sidecar reports {lvl['n_multi_rows_labelled']} labelled "
                         f"multi row(s), the state holds {len(t_multi)}")
         reasons = {}
         for r in per:
@@ -1552,27 +1551,20 @@ class RunAudit(VideoLevelModule):
         return c
 
     def _check_visualization(self, det, tracked):
-        c = Check("visualization (radar)", "every tracked SINGLE row with a pitch "
-                                            "position is drawn with a team/referee "
-                                            "colour (multi rows carry no role/team "
-                                            "by design and are expected uncoloured)")
+        c = Check("visualization (radar)", "every tracked row with a pitch position "
+                                            "is drawn with a team/referee colour "
+                                            "(the trajectory's labels are written "
+                                            "on all of its rows, multi included)")
         drawable = tracked[tracked["bbox_pitch"].apply(lambda b: isinstance(b, dict))] \
             if "bbox_pitch" in tracked.columns else tracked.iloc[0:0]
-        if "crop_single" in drawable.columns:
-            d_single = drawable[drawable["crop_single"].astype(bool)]
-            n_multi_drawable = int(len(drawable) - len(d_single))
-        else:
-            d_single, n_multi_drawable = drawable, 0
-        skipped = int(sum(1 for _, r in d_single.iterrows() if radar_color(r) is None))
+        skipped = int(sum(1 for _, r in drawable.iterrows() if radar_color(r) is None))
         c.observed = {"untracked_rows_not_drawn": int(len(det) - len(tracked)),
                       "tracked_rows_with_pitch": int(len(drawable)),
-                      "single_rows_with_pitch": int(len(d_single)),
-                      "multi_rows_with_pitch_uncoloured_by_design": n_multi_drawable,
-                      "single_rows_skipped_no_colour": skipped}
-        share = _share(skipped, len(d_single))
+                      "tracked_rows_skipped_no_colour": skipped}
+        share = _share(skipped, len(drawable))
         c.observed["skipped_share"] = round(share, 4)
         if share > self.thr["radar_skipped_tracked_warn"]:
-            c.set(WARN, f"{share:.1%} tracked single rows have no team/referee colour")
+            c.set(WARN, f"{share:.1%} tracked rows have no team/referee colour")
         return c
 
     # ---------------------------------------------------------------- main --

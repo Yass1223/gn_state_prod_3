@@ -97,6 +97,9 @@ class CompletePlayerBBox(TeamVisualizer, EllipseDetection):
     (e.g. ``10 | ID 3``) — on a near-opaque team-color tag, so inference videos read
     like a broadcast overlay. Ground truth is only drawn if a ground_truth color is
     configured in colors_gs.yaml (it is null in this pipeline: predictions only).
+    The role_team stage decides role/team per trajectory (from its single crops)
+    and writes them on every row, so multi-crop detections render in the same
+    trajectory colour without any special handling here.
 
     Subclasses EllipseDetection purely to reuse its (DetectionVisualizer) pred/GT
     matching plumbing — draw_detection is fully overridden, so no ellipse is drawn.

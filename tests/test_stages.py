@@ -174,19 +174,19 @@ def test_stages():
                             device="cpu")
     det = rt.process(det, meta)
     tracked = det.dropna(subset=["track_id"])
-    t_single = tracked[tracked["crop_single"].astype(bool)]
+    assert tracked["role"].isin(["player", "goalkeeper", "referee"]).all(), \
+        "every tracked row needs a role (decided from singles, written on all rows)"
     t_multi = tracked[~tracked["crop_single"].astype(bool)]
-    assert t_single["role"].isin(["player", "goalkeeper", "referee"]).all(), \
-        "every tracked SINGLE row needs a role"
-    assert t_multi["role"].isna().all() and t_multi["team"].isna().all(), \
-        "multi rows receive no role/team (labels on single crops only)"
+    assert t_multi["role"].notna().all(), \
+        "multi rows carry their trajectory's labels"
     assert det.loc[det.track_id.isna(), "role"].isna().all()
-    pg = t_single[t_single.role != "referee"]
+    pg = tracked[tracked.role != "referee"]
     assert pg["team"].isin(["left", "right"]).all()
-    assert t_single.loc[t_single.role == "referee", "team"].isna().all()
-    for tid, g in t_single.groupby("track_id"):
-        assert g["role"].nunique() == 1 and g["team"].astype(str).nunique() == 1
-    print("role_team:", t_single.groupby("track_id")[["role", "team"]].first().to_dict("index"))
+    assert tracked.loc[tracked.role == "referee", "team"].isna().all()
+    for tid, g in tracked.groupby("track_id"):
+        assert g["role"].nunique() == 1 and g["team"].astype(str).nunique() == 1, \
+            "role/team constant over ALL rows of the trajectory, multi included"
+    print("role_team:", tracked.groupby("track_id")[["role", "team"]].first().to_dict("index"))
     rec = json.loads((tmp / "audit_role" / "SNGS-000.json").read_text())
     assert rec["per_trajectory"] and "cues" in rec["sequence_level"]
     lvl = rec["sequence_level"]

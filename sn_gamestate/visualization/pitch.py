@@ -14,15 +14,18 @@ What is drawn, and what is not
 ------------------------------
 The radar draws exactly the rows the bounding-box layer draws: TRACKED detections
 (``track_id`` set) that have a defined colour -- ``team`` left/right, or role
-``referee``. Everything else is skipped, never painted in a neutral colour:
+``referee``. The role_team stage decides role/team per trajectory (from its
+single crops) and writes them on EVERY row, so multi-crop detections carry their
+trajectory's labels and draw like any other row. Everything else is skipped,
+never painted in a neutral colour:
 
 * untracked detections (``track_id`` NaN) never receive ``team_cluster``/``team``/an
   aggregated ``jersey_number`` (every downstream stage groups by ``track_id``), so
   they were the white discs of the previous build;
-* tracked rows whose team is undefined (role voted ``other``/NaN, or a player
-  tracklet the k-means/side labelling did not reach) are a pipeline degradation --
-  the audit stage (``sn_gamestate.audit``) counts them via ``radar_color`` below;
-  painting them white would only hide it.
+* tracked rows whose team is undefined (a labelling failure: the role stage
+  labels every trajectory, descriptor-less ones through the half fallback) are a
+  pipeline degradation -- the audit stage (``sn_gamestate.audit``) counts them
+  via ``radar_color`` below; painting them white would only hide it.
 
 The number label is drawn for players with an aggregated ``jersey_number`` and as
 ``GK`` for goalkeepers, exactly as before.
