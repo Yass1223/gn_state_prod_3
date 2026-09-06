@@ -40,10 +40,12 @@
 #                  CLEAN crops (all statistics over SINGLE rows; the decided labels
 #                  WRITTEN on all rows of the trajectory): osnet_team descriptors per trajectory; outliers by
 #                  2-means + MAD rule and a trajectory-level DBSCAN (unrelated to the
-#                  splitter's); assistants FIRST (no jersey number, min_n positions),
+#                  splitter's); assistants FIRST (no jersey number; no position
+#                  threshold; one per touchline, up to two with opposite mean y),
 #                  geometry-first; goalkeepers geometry + depth > gk_rel * max
-#                  non-assistant |mean x|; main referee = outlier + band (2.14) +
-#                  no number + closest appearance to the assistants;
+#                  non-assistant |mean x| + min_n positions; main referee =
+#                  outlier + band (2.14) +
+#                  no number + min_n + closest appearance to the assistants;
 #                  2-means refit on clean players -> left/right naming  -> role, team
 #   tracklet_agg   majority vote over [jersey_number]
 #   audit          per-component PASS/WARN/FAIL verdicts -> audit/<seq>.json (read-only)

@@ -35,7 +35,9 @@ module supplies its inputs and applies its output:
    and no contradicting numbers (two different known numbers never merge),
    distance <= ``tau``. Multi-crop detections are ghosts throughout: no
    centroid, no condition -- they follow their fragment (their one
-   exception is stage 3).
+   exception is stage 3). The two-different-assistants rule (opposite
+   touchlines, close in appearance) is NOT a merge condition: it lives in
+   the role/team assignment, on the final trajectories.
 5. Apply: rows of a merged cluster take the smallest constituent ``track_id``.
    For every cluster the resolved number, its vote share and its maxconf
    score are written to ALL member rows (so the downstream majority vote
@@ -137,7 +139,7 @@ class TrajRefine(VideoLevelModule):
         # so a disabled stage costs nothing.
         self._embedder = None
         log.info(f"[traj_refine] enabled {self.enabled}, tau {self.tau}, "
-                 f"use_reenter {self.use_reenter}, edge_margin {self.edge_margin}; "
+                 f"use_reenter {self.use_reenter} (nearest side); "
                  f"labels = team cluster + jersey number (roles/sides are assigned "
                  f"after this stage)")
 

@@ -81,10 +81,12 @@ def check_invariants(frames_arr, new_tid):
 # ---------------------------------------------------------------- helpers ----
 
 def test_helpers():
-    assert edge_side([0, 0, 40, 80], W, 38.4) == "left"
-    assert edge_side([W - 30, 0, 40, 80], W, 38.4) == "right"
-    assert edge_side([900, 0, 40, 80], W, 38.4) is None
-    assert edge_side([0, 0, W, 80], W, 38.4) is None          # both edges
+    # nearest-side rule: a side is ALWAYS defined (no touch threshold)
+    assert edge_side([0, 0, 40, 80], W) == "left"
+    assert edge_side([W - 30, 0, 40, 80], W) == "right"
+    assert edge_side([900, 0, 40, 80], W) == "left"           # centre 920 < 960
+    assert edge_side([950, 0, 40, 80], W) == "right"          # centre 970 > 960
+    assert edge_side([0, 0, W, 80], W) == "left"              # centre = mid: ties left
     a = {"7": [math.log(0.9), 1.8, 2]}
     b = {"7": [math.log(0.5), 0.5, 1], "9": [math.log(0.8), 0.8, 1]}
     m = combine_cand(a, b)
@@ -127,9 +129,10 @@ def test_s1_needs_same_cluster():
 
 
 def test_s1_reenter_blocks_and_vacuous():
-    # t1 exits at the left edge, t2 enters at the right edge -> set aside;
-    # the final phase cannot take the pair either (same conditions + tau, and
-    # the appearance distance here is ~1) -> two survivors.
+    # NEAREST-SIDE rule: t1's last box is closer to the LEFT edge, t2's first
+    # box closer to the RIGHT edge -> sides differ -> set aside; the final
+    # phase cannot take the pair either (same conditions + tau, and the
+    # appearance distance here is ~1) -> two survivors.
     t1 = rows_for(1, 0, list(range(0, 6)), x=5.0)
     t2 = rows_for(2, 0, list(range(10, 16)), x=W - 45.0)
     tracks = {1: track(0.0, "7", cand(("7", .9, 5))),
@@ -137,11 +140,30 @@ def test_s1_reenter_blocks_and_vacuous():
     new_tid, _, rep = run([t1, t2], tracks)
     assert set(new_tid) == {1, 2}
     assert rep["rejected_s1"] and rep["rejected_s1"][0]["rejected"] == "reenter"
-    # vacuous when the boundary boxes touch no edge
+    # mid-field boxes now carry a side too (no touch threshold): both centres
+    # in the left half -> sides MATCH -> merge proceeds
     t1 = rows_for(1, 0, list(range(0, 6)), x=900.0)
     t2 = rows_for(2, 1, list(range(10, 16)), x=900.0)
     new_tid, _, _ = run([t1, t2], tracks)
     assert set(new_tid) == {1}
+    # opposite halves without touching any edge -> sides differ -> blocked
+    t1 = rows_for(1, 0, list(range(0, 6)), x=700.0)           # centre 720: left
+    t2 = rows_for(2, 1, list(range(10, 16)), x=1200.0)        # centre 1220: right
+    new_tid, _, rep = run([t1, t2], tracks)
+    assert set(new_tid) == {1, 2}
+    assert rep["rejected_s1"][0]["exit_side"] == "left"
+    assert rep["rejected_s1"][0]["entry_side"] == "right"
+
+
+def test_reenter_interleaved_vacuous():
+    # clean frames disjoint but INTERVALS interleaved -> re-enter vacuous ->
+    # the S2 merge proceeds on cluster + tau alone, opposite halves or not.
+    t1 = rows_for(1, 0, [0, 10], x=100.0)
+    t2 = rows_for(2, 0, [5], x=1800.0)
+    tracks = {1: track(0.0, None), 2: track(0.0, None)}
+    new_tid, _, rep = run([t1, t2], tracks)
+    assert set(new_tid) == {1}
+    assert rep["merges"][0]["phase"] == "s2"
 
 
 def test_s1_overlap_conflict_second_candidate():

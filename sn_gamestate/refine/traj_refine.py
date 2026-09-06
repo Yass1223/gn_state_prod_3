@@ -75,10 +75,13 @@ Phase FINAL -- over ALL S1 and S2 survivors together, merged and unmerged
 alike, agglomerative as in S2. Compatible(F, G) holds iff ALL of:
 
     C2  time overlap: the CLEAN frame sets are disjoint;
-    C3  re-enter: when one cluster ends before the other begins and BOTH the
-        earlier cluster's last single box and the later cluster's first single
-        box touch a lateral image edge (within ``edge_margin`` * width), the
-        two sides must be equal; in every other case the condition is vacuous;
+    C3  re-enter (nearest-side rule): when one cluster ends before the other
+        begins, the earlier cluster's EXIT side is the lateral image edge its
+        last single box is CLOSER to, and the later cluster's ENTRY side is
+        the edge its first single box is closer to; the two sides must be
+        equal. With interleaved intervals (or no image width) the condition
+        is vacuous. There is no touch threshold: every ordered pair has a
+        defined side (``edge_margin`` is accepted for compatibility, unused);
     C4  SAME cluster id (both are known by construction of the partition);
     C5  numbers: two DIFFERENT known numbers never merge (a numbered and an
         unnumbered cluster may).
@@ -164,15 +167,13 @@ def ranked_labels(cand):
                   reverse=True)
 
 
-def edge_side(box, img_w, margin_px):
-    """'left' / 'right' when the box touches exactly one lateral image edge
-    within ``margin_px``; None when it touches neither or both (ambiguous)."""
+def edge_side(box, img_w, margin_px=None):
+    """The lateral image edge the box is CLOSER to: 'left' when its centre
+    sits in the left half of the image (ties to 'left'), else 'right'.
+    ``margin_px`` is accepted for compatibility and unused -- the
+    nearest-side rule has no touch threshold, so a side is always defined."""
     l, _, w, _ = (float(v) for v in box)
-    left = l <= margin_px
-    right = l + w >= img_w - margin_px
-    if left == right:
-        return None
-    return "left" if left else "right"
+    return "left" if l + w * 0.5 <= img_w * 0.5 else "right"
 
 
 class _Cluster:
@@ -250,8 +251,12 @@ def _dist(a, b):
 
 
 def _reenter_ok(a, b, frames, boxes, img_w, margin_frac, record=None):
-    """C3. Vacuous unless one cluster ends strictly before the other begins and
-    both boundary boxes touch a lateral edge; then the sides must be equal."""
+    """C3, nearest-side rule. Vacuous only for interleaved intervals (or no
+    image width): when one cluster ends strictly before the other begins, the
+    earlier cluster's exit side (the lateral edge its last single box is
+    closer to) must equal the later cluster's entry side (the edge its first
+    single box is closer to). ``margin_frac`` is unused (kept for the call
+    signature)."""
     if img_w is None:
         return True
     fa, la = a.first_last(frames)
@@ -262,13 +267,10 @@ def _reenter_ok(a, b, frames, boxes, img_w, margin_frac, record=None):
         earlier, later = b, a
     else:
         return True                     # interleaved intervals: vacuous
-    margin_px = float(margin_frac) * float(img_w)
-    exit_side = edge_side(boxes[earlier.last_row], img_w, margin_px)
-    entry_side = edge_side(boxes[later.first_row], img_w, margin_px)
+    exit_side = edge_side(boxes[earlier.last_row], img_w)
+    entry_side = edge_side(boxes[later.first_row], img_w)
     if record is not None:
         record.update(exit_side=exit_side, entry_side=entry_side)
-    if exit_side is None or entry_side is None:
-        return True
     return exit_side == entry_side
 
 

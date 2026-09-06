@@ -68,12 +68,19 @@ cfg:
   # this stage on any validation split yet.
   tau: 0.60
 
-  # Re-enter condition (C3): when one trajectory ends before the other begins
-  # and both boundary boxes touch a lateral image edge, the sides must match.
-  # edge_margin is the touch tolerance as a fraction of the image width
-  # (0.02 = ~38 px at 1920); not tuned on any validation split yet.
+  # Re-enter condition (C3), NEAREST-SIDE rule: when one trajectory ends before
+  # the other begins, the earlier one's exit side is the lateral image edge its
+  # last single box is CLOSER to, the later one's entry side the edge its first
+  # single box is closer to; the sides must match. A side is always defined --
+  # there is no touch threshold; edge_margin is accepted for compatibility and
+  # unused.
   use_reenter: true
   edge_margin: 0.02
+
+  # NOTE: the two-different-assistants rule (two trajectories satisfying the
+  # assistant conditions with opposite mean-y signs, close in appearance) is
+  # NOT a merge condition -- it is decided by the role_team stage on the
+  # final trajectories.
 
   # Scope: EVERY fragment. Roles do not exist at this point (role_team runs
   # after this stage), so there is no exemption; the merge conditions are the

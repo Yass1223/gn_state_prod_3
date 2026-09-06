@@ -44,9 +44,19 @@ the visualization):
    A trajectory flagged by EITHER channel is an OUTLIER; the flagged
    trajectories are grouped (``outlier_group`` in the sidecar).
 4. ASSISTANT referees FIRST, GEOMETRY FIRST: candidates carry NO jersey
-   number, have at least ``min_n`` sampled positions, hug a touchline
-   (|mean y| >= tau_a * max|mean y|, y-std <= tau_a_sy) AND carry a
-   descriptor; one per side, no outlier condition on acceptance. The
+   number, hug a touchline (|mean y| >= tau_a * max|mean y|, y-std <=
+   tau_a_sy) AND carry a descriptor -- there is NO sampled-position
+   threshold on assistants (``min_n`` applies to goalkeepers and the main
+   referee only). ONE PER SIDE, so the final trajectories can hold TWO
+   assistant referees with opposite mean-y signs, each satisfying the
+   conditions on its own touchline. THE RULE, decided here on the final
+   trajectories (deliberately NOT a merge condition): two trajectories that
+   satisfy the assistant conditions with OPPOSITE mean-y signs and are CLOSE
+   IN APPEARANCE are TWO DIFFERENT assistant referees -- the closeness is
+   expected (assistants wear the same kit), it is recorded in the sidecar
+   (``assistant_pair_appearance_d``) and BOTH are assigned; appearance
+   similarity never collapses them into one. No outlier
+   condition on acceptance. The
    geometric best (largest |mean y|) wins outright when it leads the
    runner-up by at least ``a_tie_m``; otherwise, over the tied set (every
    candidate within ``a_tie_m`` of the best): with no MAD/DBSCAN-flagged
@@ -440,7 +450,10 @@ class RoleTeamAssignment(VideoLevelModule):
         # --- 4. assistants: geometry candidates + descriptor, one per side -
         absmy = np.abs(my)
         maxmy = np.nanmax(absmy) if np.isfinite(absmy).any() else np.nan
-        assist_c = has_e & no_num & (n_pos >= int(P["min_n"])) \
+        # no min_n here: assistants have no sampled-position threshold
+        # (min_n gates goalkeepers and the main referee only); one candidate
+        # is taken per y-sign, so up to TWO assistants with opposite sides
+        assist_c = has_e & no_num \
             & np.isfinite(my) & (absmy >= P["tau_a"] * maxmy) \
             & (sy <= P["tau_a_sy"])
         n_geom_kept = 0
@@ -457,6 +470,17 @@ class RoleTeamAssignment(VideoLevelModule):
             sel = {k: ([tids[i] for i in v] if isinstance(v, list) else v)
                    for k, v in sel.items()}
             assistant_selection.append(dict(side=int(sgn), winner=tids[j], **sel))
+        # two winners (opposite touchlines): two DIFFERENT assistant
+        # referees, decided here on the final trajectories. Their appearance
+        # distance is recorded as information -- closeness is expected (same
+        # kit) and never collapses them into one.
+        assistant_pair_d = None
+        if len(assistant_selection) == 2:
+            ja = int(np.where(tids == assistant_selection[0]["winner"])[0][0])
+            jb = int(np.where(tids == assistant_selection[1]["winner"])[0][0])
+            if has_e[ja] and has_e[jb]:
+                assistant_pair_d = float(
+                    1.0 - float(desc[tids[ja]] @ desc[tids[jb]]))
 
         # --- 5. goalkeepers: geometry candidates + descriptor, one per half.
         # Depth reference: max |mean x| over every trajectory EXCEPT the
@@ -593,6 +617,8 @@ class RoleTeamAssignment(VideoLevelModule):
             main_referee_rule=main_rule,
             dbscan_eps=_f(eps), dbscan=dbscan_rec,
             gk_selection=gk_selection, assistant_selection=assistant_selection,
+            assistant_pair_appearance_d=(_f(assistant_pair_d)
+                                         if assistant_pair_d is not None else None),
             mad_refit=mad_refit,
             distance_median=_f(m), distance_mad=_f(s),
             s_ok=bool(s_ok),

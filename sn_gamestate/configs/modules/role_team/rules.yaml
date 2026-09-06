@@ -30,8 +30,9 @@
 #   either channel is an OUTLIER, and the flagged trajectories are grouped in
 #   the sidecar;
 # * ASSISTANTS FIRST, by the touchline geometry (|mean y| >= tau_a * clip max,
-#   y-std <= tau_a_sy; candidates must carry a descriptor, have NO jersey
-#   number and at least min_n sampled positions; one per side),
+#   y-std <= tau_a_sy; candidates must carry a descriptor and have NO jersey
+#   number -- there is NO sampled-position threshold on assistants; one per
+#   side, so up to TWO assistants with opposite mean-y signs),
 #   GEOMETRY FIRST, no outlier condition on acceptance: the geometric best
 #   (largest |mean y|) wins outright when it leads the runner-up by >=
 #   a_tie_m; otherwise, over the tied set, the trajectory farthest from
@@ -82,5 +83,5 @@ cfg:
     band: 0.9             # the symmetric 90% band of rule 2.14
     gk_depth_m: 2.0       # goalkeeper geometry tie margin on depth |mean x| (m)
     a_tie_m: 1.5          # assistant geometry tie margin on |mean y| (m)
-    min_n: 10             # min sampled SINGLE positions for assistant / GK / main candidacy (~2 s at stride 5)
+    min_n: 10             # min sampled SINGLE positions for goalkeeper / main-referee candidacy (~2 s at stride 5; assistants have no such threshold)
     gk_rel: 0.85          # goalkeeper: |mean x| > gk_rel * max |mean x| over non-assistant trajectories

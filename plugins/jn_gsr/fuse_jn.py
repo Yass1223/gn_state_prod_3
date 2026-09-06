@@ -16,7 +16,9 @@ maxconf 0, votes 0, strength 0 for that model.
 
 Rules (all deterministic; ties break on (score, total votes, total raw
 log-lik strength, label string), the maxconf tie rule extended to the pooled
-frames):
+frames -- EXCEPT vote_pool, whose vote ties break on the best single crop:
+(pooled votes, pooled mx = the most confident frame decode of the label
+across both models, total strength, label string)):
 
     a_maxconf        maxconf over A's frames alone (baseline; identical to
                      evaluate_jn.consolidate_tracklet_maxconf on A)
@@ -135,7 +137,14 @@ def fuse_stats(sa, sb, rules=RULES):
         elif r == "b_maxconf":
             out[r] = b_win
         elif r == "vote_pool":
-            out[r] = _pick({l: va[l] + vb[l] for l in labels}, sa, sb)
+            # vote tie -> the label whose single most confident crop decode
+            # (pooled mx over both models) is highest, then strength, label
+            out[r] = max(labels, key=lambda l: (
+                va[l] + vb[l],
+                max(sa[l]["mx"] if l in sa else float("-inf"),
+                    sb[l]["mx"] if l in sb else float("-inf")),
+                strength_of(sa, l) + strength_of(sb, l),
+                l))
         elif r == "a_mc_x_bcount":
             out[r] = _pick({l: mca[l] * vb[l] for l in labels}, sa, sb)
         elif r == "b_mc_x_acount":
@@ -262,7 +271,7 @@ if __name__ == "__main__":
     assert r["sum"] == "23" and r["prod_plus1"] == "23"
     assert r["joint_maxconf"] == "23"
     assert r["agree_first"] == "23"          # disagree -> joint -> 23
-    assert r["vote_pool"] == "23"            # 2 vs 2, strength breaks -> 23
+    assert r["vote_pool"] == "23"            # 2 vs 2, best-crop maxconf breaks -> 23
 
     # 4. count-weighting flips a label: A best frame says 45 (p .95) once, but
     #    A also read 23 twice at .6; B read 23 four times at .7 and never 45.
@@ -288,6 +297,16 @@ if __name__ == "__main__":
     TA, UA = frames(("3", 0.7)); TB, UB = frames(("8", 0.7))
     r = fuse(TA, UA, TB, UB)
     assert r["vote_pool"] == "8" and r["sum"] == "8"
+
+    # 6b. vote_pool vote tie -> the best single crop decides, NOT the summed
+    #     strength: 7 has two mediocre frames (higher total strength), 9 has
+    #     one excellent frame and one poor one (higher best-crop maxconf).
+    TA, UA = frames(("7", 0.6), ("7", 0.6))
+    TB, UB = frames(("9", 0.9), ("9", 0.2))
+    sa, sb = label_stats(TA, UA), label_stats(TB, UB)
+    assert sa["7"]["strength"] > sb["9"]["strength"]      # old rule -> 7
+    assert sb["9"]["mx"] > sa["7"]["mx"]                  # new rule -> 9
+    assert fuse(TA, UA, TB, UB)["vote_pool"] == "9"
 
 
     # 7. ranked_candidates: pooled stats combine per label (mx=max, sums add),
