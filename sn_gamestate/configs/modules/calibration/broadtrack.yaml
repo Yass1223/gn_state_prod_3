@@ -28,6 +28,21 @@ cfg:
   use_cached_json: true
   timeout: 7200          # seconds per sequence
 
+  # --- best-of-N draw selection (see docs/CALIBRATION_FIX.md) ---
+  # The binary is NONDETERMINISTIC across runs: byte-identical inputs yield a
+  # different homography each session, and GS-HOTA is scored in pitch space, so
+  # the calibration draw feeds straight into localisation/detection (~9 GS-HOTA
+  # points of spread measured on SNGS-116 from the draw alone). On a cache miss
+  # the stage runs the binary calib_attempts times and keeps the attempt whose
+  # ACCEPTED frames (score >= min_score) have the highest mean line-IoU score
+  # (tiebreak: accepted-frame count) -- the binary's own confidence signal, no
+  # ground truth, so the selection is valid on the test split. Losing attempts
+  # are deleted and <seq>.selection.json records each attempt's statistics and
+  # the winner. calib_attempts: 1 reproduces the previous single-run behaviour
+  # byte for byte. This mitigates the variance; freezing the kept draw as a
+  # dataset (the notebook's CALIB_DATASET) removes it entirely.
+  calib_attempts: 3
+
   # --- camera position prior (metres, sn-calibration world frame) ---
   # SoccerNet main camera. NOTE: the binary's built-in defaults are 0/90/-18 (Bundesliga),
   # so these are always passed explicitly. README priors: cam1 (0,55,-12),

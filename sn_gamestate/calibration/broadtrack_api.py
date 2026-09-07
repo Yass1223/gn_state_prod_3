@@ -30,6 +30,14 @@ Verified behaviours of the BroadTrack binary this wrapper compensates for
 * ``-t <file>`` existing switches the binary to tripod ("soft") mode; otherwise "free"
   mode with the ``--X/--Y/--Z`` prior. The binary's built-in defaults are ``0/90/-18``
   (Bundesliga), *not* the SoccerNet prior, so priors are always passed explicitly.
+* The binary is NONDETERMINISTIC across runs: identical inputs yield a different
+  homography each session (measured ~9 GS-HOTA points of spread on SNGS-116 from
+  the calibration draw alone). On a cache miss the stage therefore runs it
+  ``calib_attempts`` times and keeps the draw whose accepted frames have the
+  highest mean line-IoU score (the binary's own confidence; no ground truth),
+  recording every attempt in ``<seq>.selection.json`` -- see
+  ``_run_binary_best_of``. The cache (``use_cached_json``) then freezes the
+  kept draw for every later run.
 * Every frame is written with a line-IoU ``score`` and a ``reinit`` flag, INCLUDING
   frames on which tracking was lost. In ``main.cpp`` ``score < 0.3`` is the lost state
   (keypoint re-initialisation is attempted) and after more than 5 consecutive lost
@@ -183,6 +191,16 @@ class BroadTrackCalibration(VideoLevelModule):
         self.calib_dir.mkdir(parents=True, exist_ok=True)
         self.use_cached_json = bool(getattr(cfg, "use_cached_json", True))
         self.timeout = int(getattr(cfg, "timeout", 7200))
+        # Best-of-N draw selection (the binary is nondeterministic across runs):
+        # on a cache miss run it calib_attempts times and keep the attempt whose
+        # accepted frames (score >= min_score) have the highest mean line-IoU
+        # score, tiebreak on the accepted-frame count. 1 = the previous
+        # single-run behaviour, byte for byte. Selection uses only the binary's
+        # own per-frame scores -- no ground truth -- so it is valid on test.
+        self.calib_attempts = int(getattr(cfg, "calib_attempts", 1) or 1)
+        if self.calib_attempts < 1:
+            raise ValueError(f"[BroadTrack] calib_attempts must be >= 1, "
+                             f"got {self.calib_attempts}")
 
         self.prior_xyz = [float(v) for v in getattr(cfg, "prior_xyz", [0.0, 55.0, -12.0])]
         self.tripod_mode = str(getattr(cfg, "tripod_mode", "none"))  # none|per_sequence|per_game
@@ -311,6 +329,91 @@ class BroadTrackCalibration(VideoLevelModule):
             return False
         return out_json.is_file()
 
+    def _attempt_quality(self, candidate_json: Path):
+        """Quality of one calibration attempt, from the binary's OWN per-frame
+        line-IoU scores: ``(mean score over accepted frames, accepted-frame
+        count, total frames)`` with accepted = ``score >= min_score``. An
+        attempt with no accepted frame scores ``(0.0, 0, total)``. ``None``
+        when the JSON cannot be read or parsed (the attempt is then treated
+        as failed). No ground truth is involved."""
+        try:
+            data = json.loads(candidate_json.read_text())
+            scores = [float(v.get("score", 0.0)) for v in data.values()]
+        except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError):
+            return None
+        accepted = [x for x in scores if x >= self.min_score]
+        mean_acc = float(np.mean(accepted)) if accepted else 0.0
+        return mean_acc, len(accepted), len(scores)
+
+    def _run_binary_best_of(self, frames_dir: Path, out_json: Path,
+                            tripod_file=None) -> bool:
+        """Run the binary up to ``calib_attempts`` times and keep the best draw.
+
+        The binary is nondeterministic across runs (same frames, different
+        homography); the draw feeds straight into pitch-space localisation, so
+        the low tail of the draw distribution costs several GS-HOTA points.
+        Each attempt writes its own candidate JSON; quality is
+        ``_attempt_quality`` (mean accepted line-IoU, tiebreak accepted-frame
+        count -- the binary's own confidence signal, valid on test). The best
+        candidate becomes ``out_json``, the losers are deleted, and a
+        ``<seq>.selection.json`` sidecar records every attempt's statistics
+        and the winner. ``calib_attempts == 1`` reproduces the previous
+        single-run behaviour byte for byte (direct call, no sidecar). A failed
+        attempt is tolerated; if every attempt fails, the stage reports
+        failure exactly as before."""
+        n = self.calib_attempts
+        if n == 1:
+            return self._run_binary(frames_dir, out_json, tripod_file)
+
+        stem = out_json.stem
+        cand_path = lambda i: out_json.parent / f"{stem}.attempt{i}.json"
+        attempts, best = [], None            # best = ((mean, n_acc), i, path)
+        for i in range(1, n + 1):
+            cand = cand_path(i)
+            cand.unlink(missing_ok=True)
+            ok = self._run_binary(frames_dir, cand, tripod_file)
+            stat = {"attempt": i, "ok": bool(ok)}
+            if ok:
+                q = self._attempt_quality(cand)
+                if q is None:
+                    stat["ok"] = False
+                    stat["error"] = "output JSON unreadable"
+                else:
+                    mean_acc, n_acc, n_frames = q
+                    stat.update(mean_accepted_score=mean_acc,
+                                accepted_frames=n_acc, frames=n_frames)
+                    key = (mean_acc, n_acc)
+                    if best is None or key > best[0]:
+                        best = (key, i, cand)
+            attempts.append(stat)
+            log.info(f"[BroadTrack] attempt {i}/{n}: "
+                     + (f"mean accepted score {stat.get('mean_accepted_score'):.3f} "
+                        f"over {stat.get('accepted_frames')} frame(s)"
+                        if stat["ok"] else "FAILED"))
+
+        if best is None:                     # every attempt failed
+            for i in range(1, n + 1):
+                cand_path(i).unlink(missing_ok=True)
+            return False
+
+        (_, w, wpath) = best
+        out_json.unlink(missing_ok=True)
+        wpath.replace(out_json)
+        for i in range(1, n + 1):
+            cand_path(i).unlink(missing_ok=True)
+        selection = {"sequence": stem, "calib_attempts": n,
+                     "min_score": self.min_score,
+                     "attempts": attempts, "winner": w}
+        try:
+            (out_json.parent / f"{stem}.selection.json").write_text(
+                json.dumps(selection, indent=2))
+        except OSError as e:                 # never fail the run over telemetry
+            log.warning(f"[BroadTrack] could not write the selection sidecar: {e}")
+        log.info(f"[BroadTrack] best-of-{n}: kept attempt {w} "
+                 f"(mean accepted score {best[0][0]:.3f}, "
+                 f"{best[0][1]} accepted frame(s))")
+        return True
+
     def _tripod_file(self, seq_name: str, frames_dir: Path):
         """Two-pass tripod estimation (free run -> compute_tripod.py -> soft run).
 
@@ -378,7 +481,7 @@ class BroadTrackCalibration(VideoLevelModule):
                 return self._empty_outputs(detections, metadatas)
             run_dir = self._prepare_frames_dir(frames_dir, detections, metadatas)
             tripod = self._tripod_file(seq_name, run_dir)
-            if not self._run_binary(run_dir, out_json, tripod):
+            if not self._run_binary_best_of(run_dir, out_json, tripod):
                 return self._empty_outputs(detections, metadatas)
 
         try:
