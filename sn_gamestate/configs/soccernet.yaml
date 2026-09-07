@@ -12,12 +12,10 @@
 #   calibration    BroadTrack (EVS, WACV'25) + image-to-pitch -> parameters, bbox_pitch
 #   pitch_gate     off-pitch tracklets (mean bbox_pitch outside  -> track_id NaN on their rows,
 #                  105x68 m + margin_m; on/off switch)             track_id_pregate, pitch_gate_offpitch
-#   tracklet_split DBSCAN tracklet split (SPLIT ONLY) over ALL    -> track_id (fragments), track_id_presplit
-#                  detections (single + multi, all embedded), on-pitch tracklets only
-#                  (same OSNet-AIN as the tracker; reads crop_single); centroids
-#                  SINGLE-only, noise + all-multi fragments attach/dissolve by
-#                  appearance (all-multi tracklets dissolved across the video);
-#                  multi crops stay GHOSTS for every condition
+#   tracklet_split DBSCAN tracklet split (SPLIT ONLY) over SINGLE  -> track_id (fragments), track_id_presplit
+#                  detections, on-pitch tracklets only (same OSNet-AIN as the tracker;
+#                  reads crop_single); multi detections are unembedded GHOSTS attached
+#                  by time/space (all-multi tracklets dissolved across the video)
 #   team_embed     osnet_team on sampled SINGLE crops/fragment  -> team_embedding,
 #                  + 2-means TEAM CLUSTERING, every embedded        team_cluster (0/1; NaN only
 #                  fragment -> nearest centroid (kmeans2_nearest,   with no descriptor),

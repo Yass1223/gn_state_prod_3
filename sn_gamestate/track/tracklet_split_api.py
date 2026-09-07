@@ -7,27 +7,24 @@ is the label-aware ``traj_refine`` stage. The algorithm is in
 ``sn_gamestate/track/tracklet_split.py``; this module supplies its inputs and
 applies its output:
 
-1. Appearance: one OSNet-AIN embedding per tracked detection -- SINGLE
-   (``crop_single``) and multi alike -- from the same shared module and
-   checkpoint pin as the tracker (``sn_gamestate/reid/osnet_ain``), so a crop
-   embeds to the same vector in both stages. Multi crops are embedded for the
-   CLUSTERING and their own placement only: they remain GHOSTS for every
-   condition (centroids are single-only, and no merge condition downstream
-   reads them). A detection whose box clamps to nothing, or whose frame
-   cannot be read, keeps an all-zero feature; it is at cosine distance 1
-   from everything and its placement falls to the deterministic tie rules.
+1. Appearance: one OSNet-AIN embedding per SINGLE (``crop_single``) tracked
+   detection, from the same shared module and checkpoint pin as the tracker
+   (``sn_gamestate/reid/osnet_ain``), so a crop embeds to the same vector in
+   both stages. Multi-player detections are GHOSTS and are NEVER embedded in
+   this stage; they keep an all-zero feature that nothing reads. A single
+   detection whose box clamps to nothing, or whose frame cannot be read,
+   keeps an all-zero feature too; it is at cosine distance 1 from everything
+   and its placement falls to the deterministic tie rules.
 2. Clean/overlapping label: the crop filter's ``crop_single`` column, read,
    never recomputed.
-3. Split, per tracklet: DBSCAN over ALL detections (single and multi);
-   fragment centroids over SINGLE non-zero members only; every noise
-   detection (single or multi) assigned to the nearest single-fragment
-   centroid by appearance; an all-multi FRAGMENT dissolved per detection to
-   the nearest single-fragment of the same tracklet (see the algorithm
-   module). An all-multi TRACKLET is dissolved across the video by
-   appearance: each of its detections goes to the fragment -- of any
-   tracklet -- with the nearest single-only centroid, recomputed from the
-   final membership; with no fragment anywhere it stays one fragment of its
-   own (``allmulti_kept``).
+3. Split, per tracklet: DBSCAN over the SINGLE detections only; single noise
+   assigned to the nearest fragment centroid; ghosts attached appearance-free
+   (nearest single detection in time, ties on image-space centre distance,
+   then lowest label); centroids single-only throughout (see the algorithm
+   module). An all-multi TRACKLET is dissolved across the video: each of its
+   detections goes to the fragment -- of any tracklet -- whose nearest-in-time
+   single detection is spatially closest; with no fragment anywhere it stays
+   one fragment of its own (``allmulti_kept``).
 4. Relabel: fragments become the new trajectories, numbered ``1..T`` in
    (source tracklet, fragment) order. EVERY tracked detection stays assigned
    -- the splitter never unassigns a row and never merges fragments. The
@@ -36,8 +33,8 @@ applies its output:
 
 Output structure: SINGLE rows hold at most one detection per (``image_id``,
 ``track_id``) and every fragment's single rows come from exactly one source
-tracklet (fragments partition the tracklets' single detections). Multi rows
-placed within their own tracklet inherit both guarantees; rows
+tracklet (fragments partition the tracklets' single detections). Ghost rows
+attached within their own tracklet inherit both guarantees; rows
 CROSS-ASSIGNED from dissolved all-multi tracklets are the ONE legal source of
 (a) fragments holding rows of more than one source tracklet and (b) two
 detections of one fragment in one frame -- always multi rows, counted in the
@@ -103,23 +100,25 @@ class TrackletSplit(VideoLevelModule):
         self.embedder = osnet_ain.from_config(cfg, device, batch_size=self.batch_size)
         log.info(f"[tracklet_split] eps {self.eps}, min_samples {self.min_samples}; "
                  f"embedder {self.embedder.info.get('sha256', '?')[:16]} "
-                 f"({self.embedder.info.get('precision')}); DBSCAN over ALL "
-                 f"detections, centroids single-only (multi crops stay ghosts for "
-                 f"every condition), the pipeline's one merge is traj_refine")
+                 f"({self.embedder.info.get('precision')}); split only over SINGLE "
+                 f"crops (multi detections are unembedded ghosts), the pipeline's "
+                 f"one merge is traj_refine")
 
     # ------------------------------------------------------------------ features
     @torch.no_grad()
     def _extract_features(self, dets: pd.DataFrame, metadatas: pd.DataFrame,
                           record: dict) -> np.ndarray:
-        """Appearance feature per row, aligned to ``dets.index``; EVERY row
-        is embedded -- single and multi crops alike (zeros on failure)."""
+        """Appearance feature per row, aligned to ``dets.index``; SINGLE rows
+        only are embedded (zeros on failure), multi rows stay zero and are
+        never read."""
         feats = np.zeros((len(dets), self.embedder.dim), dtype=np.float32)
         id2path = (metadatas["file_path"].to_dict()
                    if "file_path" in metadatas.columns else {})
         pos = {idx: i for i, idx in enumerate(dets.index)}
         n_missing_path = n_unreadable = n_degenerate = 0
 
-        for image_id, group in dets.groupby("image_id"):
+        singles = dets[dets["crop_single"].astype(bool)]
+        for image_id, group in singles.groupby("image_id"):
             path = id2path.get(image_id)
             if path is None:
                 n_missing_path += 1
@@ -144,25 +143,27 @@ class TrackletSplit(VideoLevelModule):
                 for r, f in zip(rows, self.embedder.embed(crops)):
                     feats[pos[r]] = f
 
-        n_rows = int(len(dets))
-        n_zero = int((~feats.any(axis=1)).sum()) if n_rows else 0
+        n_single = int(len(singles))
+        sing_rows = np.array([pos[i] for i in singles.index], dtype=np.int64) \
+            if n_single else np.zeros(0, np.int64)
+        n_zero = int((~feats[sing_rows].any(axis=1)).sum()) if n_single else 0
         record["inputs"].update(frames_without_path=n_missing_path,
                                 frames_unreadable=n_unreadable,
                                 degenerate_boxes=n_degenerate,
                                 zero_embeddings=n_zero,
-                                rows_embedded=n_rows - n_zero)
+                                rows_embedded=n_single - n_zero)
         if n_missing_path or n_unreadable:
             log.warning(f"[tracklet_split] skipped {n_missing_path} frame(s) with no "
                         f"file_path and {n_unreadable} unreadable frame(s); their "
-                        f"detections keep zero features.")
-        if n_rows and n_zero == n_rows:
+                        f"single detections keep zero features.")
+        if n_single and n_zero == n_single:
             raise RuntimeError(
-                f"[tracklet_split] all {n_rows} tracked detection crops produced an "
+                f"[tracklet_split] all {n_single} single detection crops produced an "
                 f"all-zero appearance feature - the appearance model or the frame "
                 f"paths are broken; refusing to split tracklets on empty embeddings.")
-        if n_rows and n_zero > 0.05 * n_rows:
-            log.warning(f"[tracklet_split] {n_zero}/{n_rows} "
-                        f"({n_zero / n_rows:.1%}) tracked detections have an "
+        if n_single and n_zero > 0.05 * n_single:
+            log.warning(f"[tracklet_split] {n_zero}/{n_single} "
+                        f"({n_zero / n_single:.1%}) single detections have an "
                         f"all-zero appearance feature")
         return feats
 
@@ -210,6 +211,8 @@ class TrackletSplit(VideoLevelModule):
         if not np.all(tids == np.round(tids)):
             raise RuntimeError(f"[tracklet_split] {seq}: non-integer track_id values")
         tids = tids.astype(np.int64)
+        boxes = np.stack([np.asarray(b, dtype=np.float64)
+                          for b in work["bbox_ltwh"]])
         record["inputs"]["single_tracked"] = int(single.sum())
         record["inputs"]["multi_tracked"] = int((~single).sum())
         record["inputs"]["tracklets_without_single"] = int(
@@ -218,7 +221,8 @@ class TrackletSplit(VideoLevelModule):
 
         feats = self._extract_features(work, metadatas, record)
         frag, per_tracklet, vrep = ts.split_video(feats, single, frames, tids,
-                                                  self.eps, self.min_samples)
+                                                  boxes, self.eps,
+                                                  self.min_samples)
         record["ran"] = True
 
         # Relabel: fragments -> 1..T in (source tracklet, fragment) order.
@@ -268,9 +272,7 @@ class TrackletSplit(VideoLevelModule):
             fragments=int(len(uniq)),
             tracklets_split=int(sum(1 for p in per_tracklet if p["k"] > 1)),
             noise=int(sum(p["noise"] for p in per_tracklet)),
-            multifrag_rows=int(sum(p["multifrag_rows"] for p in per_tracklet)),
-            multifrag_dissolved=int(sum(p["multifrag_dissolved"]
-                                        for p in per_tracklet)),
+            ghosts=int(sum(p["ghosts"] for p in per_tracklet)),
             allmulti_tracklets=vrep.get("allmulti_tracklets", []),
             allmulti_dissolved=int(len(vrep.get("allmulti_tracklets", []))
                                    - n_kept),
@@ -286,10 +288,8 @@ class TrackletSplit(VideoLevelModule):
         log.info(f"[tracklet_split] {seq}: {record['inputs']['tracklets']} tracklets "
                  f"-> {record['split']['fragments']} fragments "
                  f"({record['split']['tracklets_split']} split, "
-                 f"{record['split']['noise']} noise row(s) attached, "
-                 f"{record['split']['multifrag_rows']} row(s) out of "
-                 f"{record['split']['multifrag_dissolved']} dissolved all-multi "
-                 f"fragment(s), "
+                 f"{record['split']['noise']} single noise attached, "
+                 f"{record['split']['ghosts']} ghost(s) attached, "
                  f"{record['split']['allmulti_dissolved']} all-multi tracklet(s) "
                  f"dissolved / {n_cross} row(s) cross-assigned, "
                  f"{n_kept} kept, {n_noclean} fragment(s) without a single "

@@ -453,16 +453,15 @@ class RunAudit(VideoLevelModule):
         The stage is Stage 1 of the refinement method and SPLIT ONLY: the
         pipeline's one merge is ``traj_refine``, so any merging evidence here
         (a merge threshold in the settings, merge or pass sections in the
-        sidecar, dropped rows) is a FAIL. The split's DBSCAN runs over ALL
-        detections (single and multi, all embedded); centroids are
-        single-only and multi crops stay ghosts for every condition, and a
-        dissolved all-multi tracklet's rows are the ONE
+        sidecar, dropped rows) is a FAIL. The split runs over SINGLE
+        detections only; multi detections are unembedded ghosts attached by
+        time/space, and a dissolved all-multi tracklet's rows are the ONE
         legal source of cross-tracklet fragments and of frame collisions --
         always multi rows, counted in the sidecar. ``tracked`` must hold the
         track ids as the splitter LEFT them: the traj_refine stage relabels
         afterwards and keeps them per row, so ``process`` rebuilds this frame
         from ``track_id_prerefine``."""
-        c = Check("tracklet_split (all-detection DBSCAN split, single-only centroids, no merging)",
+        c = Check("tracklet_split (single-only DBSCAN split + ghost attachment, no merging)",
                   "sidecar for the sequence; settings (eps, min_samples) and checkpoint "
                   "that ran equal the configured ones; NO merge threshold anywhere; "
                   "crop_single received; per-tracklet fragment counts + kept all-multi "
@@ -524,7 +523,7 @@ class RunAudit(VideoLevelModule):
                 c.set(FAIL, "every tracked detection embedded to zero")
             elif _share(n_zero, n_in) > self.thr["tracklet_split_zero_emb_warn"]:
                 c.set(WARN, f"{_share(n_zero, n_in):.1%} tracked detections with an "
-                            f"all-zero embedding (they place by the deterministic "
+                            f"all-zero embedding (they attach by the deterministic "
                             f"tie rules)")
         if int(inp.get("frames_without_path") or 0) or int(inp.get("frames_unreadable") or 0):
             c.set(WARN, f"{inp.get('frames_without_path')} frame(s) without path, "
@@ -573,7 +572,7 @@ class RunAudit(VideoLevelModule):
         if int(outp.get("multi_frame_collisions") or 0) > n_cross:
             c.set(FAIL, f"{outp.get('multi_frame_collisions')} multi-row frame "
                         f"collision(s) exceed the {n_cross} cross-assigned row(s); "
-                        f"a within-tracklet multi row collided, which cannot happen")
+                        f"a within-tracklet ghost collided, which cannot happen")
         if int(outp.get("fragments_multi_origin_single") or 0):
             c.set(FAIL, f"{outp.get('fragments_multi_origin_single')} fragment(s) mix "
                         f"SINGLE detections from more than one source tracklet")

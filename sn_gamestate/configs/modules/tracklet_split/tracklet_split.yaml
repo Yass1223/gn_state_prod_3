@@ -7,24 +7,21 @@
 # cluster and jersey-number evidence). There is deliberately NO merge threshold
 # here; the run audit FAILS the run if one appears.
 #
-# GHOST RULE (conditions, not embeddings): EVERY tracked detection is embedded
-# in this stage -- single and multi crops alike -- and the DBSCAN runs over all
-# of them. Multi crops remain ghosts for every CONDITION: fragment centroids
-# are means over SINGLE detections only, and no merge condition downstream
-# reads a multi row until traj_refine's stage-3 duplicate resolution on the
-# final trajectories.
+# GHOST RULE: multi-player (non-crop_single) detections are never embedded in
+# this stage and take no part in the clustering or in any centroid; they are
+# only ATTACHED to a fragment, appearance-free, so they follow that fragment's
+# cluster through every later merge.
 #
 # Method (sn_gamestate/track/tracklet_split.py): per tracklet, DBSCAN over the
-# cosine distances of ALL its detections (single and multi). A raw fragment
-# with at least one single detection is a single-fragment; its centroid is the
-# mean unit embedding of its single non-zero members. A raw fragment with NO
-# single detection is dissolved per detection to the nearest single-fragment
-# centroid of the same tracklet; every DBSCAN noise detection (single or
-# multi) attaches the same way -- so every fragment holds at least one single
-# detection. A tracklet with NO single detection is dissolved across the
-# video by appearance: each of its detections goes to the fragment (of any
-# tracklet) with the nearest single-only centroid, recomputed from the final
-# membership; these cross-assigned rows are the one legal source of
+# cosine distances of its SINGLE (crop_single) detections only; single noise
+# points attach to the nearest fragment centroid (centroids from single
+# detections only); every multi detection attaches to the fragment of the same
+# tracklet whose nearest single detection is closest IN TIME (ties on the
+# image-space box-centre distance, then the lowest label) -- so every fragment
+# of a mixed tracklet holds at least one single detection. A tracklet with NO
+# single detection is dissolved across the video: each of its detections goes
+# to the fragment (of any tracklet) whose nearest-in-time single detection is
+# spatially closest; these cross-assigned rows are the one legal source of
 # cross-tracklet fragments and of (multi-row) frame collisions, both counted
 # in the sidecar and resolved by traj_refine's stage 3 on the final
 # trajectories. With no fragment anywhere the tracklet stays one fragment of
@@ -50,10 +47,10 @@ cfg:
   # Hub. Keep it in step with the tracker's value, or the two stages embed the same
   # crop with two different models.
   ain_local_path: null
-  eps: 0.2            # DBSCAN eps on cosine distance, per tracklet, over ALL its detections
-  min_samples: 5      # DBSCAN min_samples; a tracklet with fewer detections is one fragment
+  eps: 0.2            # DBSCAN eps on cosine distance, per tracklet, over its SINGLE detections
+  min_samples: 5      # DBSCAN min_samples; a tracklet with fewer singles is one fragment
   batch_size: 64      # crops per appearance forward pass
   # Per-sequence sidecar (settings, embedder digest, per-tracklet split report,
-  # noise/dissolved-fragment and all-multi dissolution counts, output counts)
-  # read by the `audit` stage.
+  # ghost-attachment and all-multi dissolution counts, output counts) read by
+  # the `audit` stage.
   audit_dir: ${project_dir}/audit/tracklet_split
