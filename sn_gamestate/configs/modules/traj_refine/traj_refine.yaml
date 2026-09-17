@@ -60,12 +60,13 @@ cfg:
   # (for measuring this stage's metric contribution on the same run).
   enabled: true
 
-  # Merge acceptance threshold on the appearance distance (1 - dot of mean unit
-  # vectors over clean detections), phases S2 and FINAL (phase S1 is
-  # label-driven and carries no threshold). The pipeline's ONLY merge
-  # threshold (the splitter never merges). 0.60 is inherited from the retired
-  # split_merge stage's notebook-validated operating point; NOT re-tuned for
-  # this stage on any validation split yet.
+  # Merge acceptance threshold on the appearance distance (1 - dot of the two
+  # clusters' MEDIAN unit vectors over clean detections, each median recomputed
+  # over the cluster's full membership after every merge), phases S2 and FINAL
+  # (phase S1 is label-driven and carries no threshold). The pipeline's ONLY
+  # merge threshold (the splitter never merges). 0.60 is inherited from the
+  # mean-centroid operating point; re-tune for the median distance on a
+  # validation split.
   tau: 0.60
 
   # There is NO re-enter condition: time-disjoint same-cluster fragments face

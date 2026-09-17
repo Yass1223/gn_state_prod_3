@@ -9,7 +9,7 @@ trajectories. Every fragment is in scope: there is no role to exempt anyone.
 
 GHOST RULE. Multi-player (non-``crop_single``) detections take no part in any
 merge condition: they are absent from the clean-frame disjointness test and
-from every centroid (centroids are means over CLEAN
+from every centroid (centroids are computed over CLEAN
 non-zero detections ONLY -- there is no fallback to multi rows; a cluster
 without such a detection has no centroid and never merges on appearance).
 Ghost rows simply follow their fragment through every merge. The ONE place
@@ -61,10 +61,11 @@ JOINT pooled maxconf (``exp(max(mx_F, mx_G)) * (conf_sum_F + conf_sum_G)``):
     shrinks a candidate list's unbanned prefix (conflict).
 
 Phase S2 -- within S2 (including any fragment demoted from S1), agglomerative
-average-linkage merging (group distance = 1 minus the dot product of the two
-mean unit vectors over clean detections). Compatible(F, G) holds iff the
-clusters are EQUAL and the CLEAN frame sets are disjoint; the closest
-compatible pair merges while its distance <= tau.
+median-centroid merging (group distance = 1 minus the dot product of the two
+clusters' MEDIAN unit vectors over clean detections, each median recomputed
+over the cluster's full clean membership after every merge). Compatible(F, G)
+holds iff the clusters are EQUAL and the CLEAN frame sets are disjoint; the
+closest compatible pair merges while its distance <= tau.
 
 Phase FINAL -- over ALL S1 and S2 survivors together, merged and unmerged
 alike, agglomerative as in S2. Compatible(F, G) holds iff ALL of:
@@ -158,8 +159,8 @@ def ranked_labels(cand):
 class _Cluster:
     """Mutable merge state of one (possibly merged) trajectory."""
 
-    __slots__ = ("tids", "rows", "sum_clean", "n_clean", "clean_frames",
-                 "cluster", "number", "cand", "scope", "banned")
+    __slots__ = ("tids", "rows", "sum_clean", "n_clean", "clean_emb",
+                 "clean_frames", "cluster", "number", "cand", "scope", "banned")
 
     def __init__(self, tid, rows, E, single, frames, info):
         self.tids = [int(tid)]
@@ -169,6 +170,11 @@ class _Cluster:
         self.sum_clean = E[self.rows[clean]].sum(axis=0).astype(np.float64) \
             if clean.any() else np.zeros(E.shape[1], dtype=np.float64)
         self.n_clean = int(clean.sum())
+        # Clean unit embeddings retained for the MEDIAN merge centroid
+        # (median_centroid): a median is not a running statistic, so it is
+        # recomputed over the full membership on every merge.
+        self.clean_emb = E[self.rows[clean]].astype(np.float32) \
+            if clean.any() else np.zeros((0, E.shape[1]), dtype=np.float32)
         fr = np.asarray(frames, dtype=np.int64)[self.rows]
         sr = np.asarray(single, dtype=bool)[self.rows]
         self.clean_frames = set(int(x) for x in fr[sr])
@@ -187,10 +193,20 @@ class _Cluster:
 
     def centroid(self):
         """Mean unit vector over CLEAN non-zero rows; None otherwise (ghost
-        rule: no fallback to multi rows -- such a cluster never merges on
-        appearance)."""
+        rule: no fallback to multi rows). Stage 3's placement metric only --
+        the MERGE distance uses ``median_centroid()``."""
         if self.n_clean:
             return self.sum_clean / self.n_clean
+        return None
+
+    def median_centroid(self):
+        """Coordinate-wise median over CLEAN non-zero rows; None otherwise.
+        The MERGE distance centroid (``_dist`` -> phase-S1 logging and the
+        S2/FINAL agglomeration). Not a running statistic: recomputed from the
+        retained ``clean_emb`` over the cluster's full membership on every
+        merge. Ghost rule holds (clean rows only, no fallback to multi)."""
+        if len(self.clean_emb):
+            return np.median(self.clean_emb, axis=0)
         return None
 
     def absorb(self, other, frames):
@@ -198,6 +214,9 @@ class _Cluster:
         self.rows = np.concatenate([self.rows, other.rows])
         self.sum_clean += other.sum_clean
         self.n_clean += other.n_clean
+        # grow the retained clean embeddings so the median recomputes over the
+        # union on the next centroid query (dynamic centroid)
+        self.clean_emb = np.concatenate([self.clean_emb, other.clean_emb])
         self.clean_frames |= other.clean_frames
         self.cluster = self.cluster if self.cluster is not None else other.cluster
         self.number = self.number or other.number
@@ -208,7 +227,10 @@ class _Cluster:
 # ------------------------------------------------------------------ conditions
 
 def _dist(a, b):
-    ca, cb = a.centroid(), b.centroid()
+    # MERGE distance: cosine distance between the two clusters' MEDIAN
+    # centroids, each recomputed over its full clean membership after every
+    # merge. (Stage 3 uses the mean centroid() instead.)
+    ca, cb = a.median_centroid(), b.median_centroid()
     if ca is None or cb is None:
         return float("inf")
     return 1.0 - float(ca @ cb)
@@ -288,8 +310,9 @@ def _resolve_conflict(a, b, pair_mc, report):
 # ---------------------------------------------------- agglomerative phases
 
 def _agglomerate(clusters, member, compat, frames, tau, phase, report):
-    """Closest-pair average-linkage merging among ``member(c)`` clusters under
-    ``compat`` and ``distance <= tau``. Mutates ``clusters``."""
+    """Closest-pair median-centroid-linkage merging among ``member(c)``
+    clusters under ``compat`` and ``distance <= tau`` (``_dist`` = cosine
+    distance of the two clusters' median centroids). Mutates ``clusters``."""
     keys = sorted(k for k, c in clusters.items() if member(c))
     k = len(keys)
     alive = np.ones(k, dtype=bool)
