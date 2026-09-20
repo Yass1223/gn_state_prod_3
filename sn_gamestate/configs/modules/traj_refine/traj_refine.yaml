@@ -11,20 +11,28 @@
 # merge; the one exception is stage 3 (final-trajectory duplicate resolution),
 # which places them by appearance, no-overlap, with dynamic centroids.
 #
-# Method (sn_gamestate/refine/traj_refine.py): THREE PHASES over a partition
-# of the fragments by label knowledge -- S1: cluster AND number known; S2:
-# cluster known, number unknown; a fragment with NO cluster id never merges.
+# Method (sn_gamestate/refine/traj_refine.py): a WITHIN-TRACKLET phase 0 FIRST,
+# then THREE cross-tracklet phases over a partition of the fragments by label
+# knowledge -- S1: cluster AND number known; S2: cluster known, number unknown;
+# a fragment with NO cluster id never merges.
+# Phase 0 (WITHIN-TRACKLET) re-merges fragments of the SAME source tracklet
+# (the splitter's track_id_presplit), undoing over-splits with the cluster +
+# number evidence the splitter lacked: same cluster + same known number merges
+# with NO threshold (rule A); same cluster + >=1 number UNKNOWN merges when the
+# median-centroid distance <= tau (rule B); two DIFFERENT known numbers never
+# merge (the splitter's identity switch). Same-tracklet single fragments are
+# frame-disjoint by construction.
 # Phase S1 merges trajectory pairs with EQUAL cluster and EQUAL number, in
 # descending order of the pair's joint maxconf score, when their clean frame
-# sets are disjoint and their exit/entry sides are consistent -- NO distance
-# threshold (the two labels together already identify one player); a pair
-# claiming one number at the SAME time is a conflict, resolved by reassigning
-# the lower-maxconf side to its best remaining jersey candidate (an unnumbered
-# loser leaves S1 and joins S2). Phase S2 merges agglomeratively (average
-# linkage) within S2 under equal cluster, clean-frame disjointness and
-# re-enter, distance <= tau. The FINAL phase pools ALL S1 and S2 survivors,
-# merged and unmerged alike, and merges agglomeratively under clean-frame
-# disjointness, re-enter, the SAME cluster id and no contradicting numbers
+# sets are disjoint -- NO distance threshold (the two labels together already
+# identify one player); a pair claiming one number at the SAME time is a
+# conflict, resolved by reassigning the lower-maxconf side to its best remaining
+# jersey candidate (an unnumbered loser leaves S1 and joins S2). Phase S2 merges
+# agglomeratively (median centroid over clean detections, recomputed over the
+# full membership after every merge) within S2 under equal cluster and
+# clean-frame disjointness, distance <= tau. The FINAL phase pools ALL S1 and S2
+# survivors, merged and unmerged alike, and merges agglomeratively under
+# clean-frame disjointness, the SAME cluster id and no contradicting numbers
 # (two different known numbers never merge), distance <= tau.
 # EVERY fragment is in scope (there is no role to exempt anyone). After the
 # merge the fragment-level team embeddings are dropped: trajectories carry the

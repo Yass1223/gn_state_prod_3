@@ -23,8 +23,12 @@
 #   jersey_number  jn_pipeline_gsr (legibility -> DBNet++ -> PARSeq + SATRN -> vote_pool), multi-GPU;
 #                  eligibility = at least one single crop (NO role filter)
 #                  + per-fragment maxconf candidate stats  -> jersey_number_candidates, jersey_number_maxconf
-#   traj_refine    the pipeline's ONE merge, on CLUSTER + number evidence, in THREE
-#                  phases by label knowledge (unclustered fragments never merge):
+#   traj_refine    the pipeline's ONE merge, on CLUSTER + number evidence: a
+#                  WITHIN-TRACKLET phase 0 first (re-merge fragments of the SAME
+#                  source tracklet: same cluster+same number, or same cluster+
+#                  number-unknown within tau; different known numbers never merge),
+#                  then THREE cross-tracklet phases by label knowledge (unclustered
+#                  fragments never merge):
 #                  S1 = cluster+number known, same-cluster same-number merges, NO
 #                  distance threshold, number conflicts resolved by maxconf; S2 =
 #                  cluster known / number unknown, agglomerative within tau; FINAL =

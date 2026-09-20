@@ -353,6 +353,89 @@ def test_invariants_and_determinism():
     assert m.get((1, 2)) == "s1" and m.get((3, 4)) == "s2"
 
 
+# --------------------------------------------- phase 0 (within-tracklet) ----
+
+def wtrack(source_tid, cluster=None, number=None, c=None, scope=True):
+    return dict(cluster=cluster, number=number, cand=c or [], scope=scope,
+                source_tid=source_tid)
+
+
+def test_within_rule_a_same_number_no_threshold():
+    # same source tracklet (100), same cluster + same number, but FAR in
+    # appearance (different idents, dist ~1 > tau): rule A merges with NO
+    # threshold, recorded in phase 'within'.
+    t1 = rows_for(1, 0, range(0, 6))
+    t2 = rows_for(2, 1, range(10, 16))
+    tracks = {1: wtrack(100, 0.0, "7", cand(("7", .9, 5))),
+              2: wtrack(100, 0.0, "7", cand(("7", .8, 4)))}
+    new_tid, resolved, rep = run([t1, t2], tracks)
+    assert set(new_tid) == {1}
+    assert rep["merges"][0]["phase"] == "within"
+    assert resolved[1]["number"] == "7" and resolved[1]["cluster"] == 0.0
+    check_invariants(build(t1, t2)[2], new_tid)
+
+
+def test_within_rule_b_unknown_number_close_appearance():
+    # same source + cluster, one numbered one unknown, SAME ident (dist ~0 <=
+    # tau): rule B merges and the number propagates to the unnumbered fragment.
+    t1 = rows_for(1, 0, range(0, 6))
+    t2 = rows_for(2, 0, range(10, 16))
+    tracks = {1: wtrack(100, 0.0, "7", cand(("7", .9, 5))),
+              2: wtrack(100, 0.0, None)}
+    new_tid, resolved, rep = run([t1, t2], tracks)
+    assert set(new_tid) == {1}
+    assert rep["merges"][0]["phase"] == "within"
+    assert resolved[1]["number"] == "7"
+
+
+def test_within_rule_b_rejects_far_appearance():
+    # same source + cluster, both unknown, FAR appearance (dist ~1 > tau): no
+    # within merge, and S2 also needs dist <= tau -> two survivors.
+    t1 = rows_for(1, 0, range(0, 6))
+    t2 = rows_for(2, 1, range(10, 16))
+    tracks = {1: wtrack(100, 0.0, None), 2: wtrack(100, 0.0, None)}
+    new_tid, _, rep = run([t1, t2], tracks)
+    assert len(set(new_tid)) == 2
+    assert not any(m["phase"] == "within" for m in rep["merges"])
+
+
+def test_within_different_known_numbers_never_merge():
+    # same source + cluster, DIFFERENT known numbers, CLOSE appearance: the
+    # splitter's identity switch -- never merged by any phase (within: no;
+    # S1 pairs same number only; FINAL C5 blocks different known numbers).
+    t1 = rows_for(1, 0, range(0, 6))
+    t2 = rows_for(2, 0, range(10, 16))
+    tracks = {1: wtrack(100, 0.0, "7", cand(("7", .9, 5))),
+              2: wtrack(100, 0.0, "9", cand(("9", .9, 5)))}
+    new_tid, _, rep = run([t1, t2], tracks)
+    assert len(set(new_tid)) == 2
+    assert not any(m["phase"] == "within" for m in rep["merges"])
+
+
+def test_within_restricted_to_same_source():
+    # DIFFERENT source tracklets (100, 200), same cluster + same number:
+    # phase 0 skips (cross-tracklet); S1 still merges them.
+    t1 = rows_for(1, 0, range(0, 6))
+    t2 = rows_for(2, 1, range(10, 16))
+    tracks = {1: wtrack(100, 0.0, "7", cand(("7", .9, 5))),
+              2: wtrack(200, 0.0, "7", cand(("7", .8, 4)))}
+    new_tid, _, rep = run([t1, t2], tracks)
+    assert set(new_tid) == {1}
+    assert rep["merges"][0]["phase"] == "s1"
+    assert not any(m["phase"] == "within" for m in rep["merges"])
+
+
+def test_within_noop_without_source_tid():
+    # no source_tid -> phase 0 is a no-op; S1 handles the same-number merge.
+    t1 = rows_for(1, 0, range(0, 6))
+    t2 = rows_for(2, 1, range(10, 16))
+    tracks = {1: track(0.0, "7", cand(("7", .9, 5))),
+              2: track(0.0, "7", cand(("7", .8, 4)))}
+    new_tid, _, rep = run([t1, t2], tracks)
+    assert set(new_tid) == {1}
+    assert not any(m["phase"] == "within" for m in rep["merges"])
+
+
 if __name__ == "__main__":
     import sys
     mod = sys.modules[__name__]

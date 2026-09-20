@@ -20,7 +20,12 @@ module supplies its inputs and applies its output:
    stats). Every fragment is in scope -- there is no role to exempt anyone.
 3. Chronology: the dataset's frame index (``team_embed_api.frame_index``), so
    frame equality and time order are the dataset's, not ``image_id`` order.
-4. Refine, in THREE PHASES over a partition of the fragments by label
+4. Refine. A WITHIN-TRACKLET phase 0 runs FIRST: it re-merges fragments of
+   the SAME source tracklet (``track_id_presplit``) -- same cluster + same
+   number with NO threshold, or same cluster + >=1 number unknown when the
+   median-centroid distance <= ``tau``; two DIFFERENT known numbers never
+   merge (the splitter's identity switch). Then THREE cross-tracklet phases
+   over a partition of the fragments by label
    knowledge (S1: cluster AND number known; S2: cluster known, number
    unknown; a fragment with no cluster id never merges). Phase S1: within
    S1, same-cluster same-number merges under clean-frame disjointness,
@@ -108,7 +113,8 @@ def _is_null(v):
 class TrajRefine(VideoLevelModule):
     input_columns = ["track_id", "bbox_ltwh", "image_id", "crop_single",
                      "team_cluster", "jersey_number_detection",
-                     "jersey_number_confidence", "jersey_number_candidates"]
+                     "jersey_number_confidence", "jersey_number_candidates",
+                     "track_id_presplit"]
     output_columns = ["track_id", "track_id_prerefine",
                       "jersey_number_detection", "jersey_number_confidence",
                       "jersey_number_maxconf",
@@ -212,10 +218,22 @@ class TrajRefine(VideoLevelModule):
             numbers = [v for v in grp["jersey_number_detection"] if not _is_null(v)]
             cand = next((v for v in grp["jersey_number_candidates"]
                          if isinstance(v, (list, tuple)) and len(v)), None)
+            # source tracklet for phase 0 (within-tracklet merge): the splitter's
+            # track_id_presplit of this fragment's SINGLE rows (those come from
+            # exactly one source tracklet); most-common value, deterministic.
+            src = None
+            if "track_id_presplit" in grp.columns:
+                base = grp
+                if "crop_single" in grp.columns and grp["crop_single"].astype(bool).any():
+                    base = grp[grp["crop_single"].astype(bool)]
+                pres = base["track_id_presplit"].dropna()
+                if len(pres):
+                    src = int(round(float(pres.mode().iloc[0])))
             tracks[int(tid)] = dict(
                 cluster=float(cl[0]) if cl else None,
                 number=str(numbers[0]) if numbers else None,
                 cand=cand or [],
+                source_tid=src,
                 scope=True)
         record["inputs"]["in_scope"] = len(tracks)
         record["inputs"]["numbered"] = sum(1 for t in tracks.values() if t["number"])
@@ -243,8 +261,9 @@ class TrajRefine(VideoLevelModule):
                       embedder=None,
                       inputs=dict(detections=int(len(detections)), tracked=0,
                                   tracklets=0),
-                      outputs=dict(tracklets=0, merges=0, merges_s1=0,
-                                   merges_s2=0, merges_final=0, conflicts=0,
+                      outputs=dict(tracklets=0, merges=0, merges_within=0,
+                                   merges_s1=0, merges_s2=0, merges_final=0,
+                                   conflicts=0,
                                    rows_relabelled=0, rows_unassigned=0,
                                    frame_collisions=0,
                                    team_embedding_dropped=False))
@@ -341,10 +360,13 @@ class TrajRefine(VideoLevelModule):
                       f"({int(tracked_out['track_id'].notna().sum())}) != tracked in "
                       f"({len(work)}) - stage-3 unassigned ({n_unassigned})")
 
+        merges_within = sum(1 for m in rep["merges"] if m["phase"] == "within")
         merges_s1 = sum(1 for m in rep["merges"] if m["phase"] == "s1")
         merges_s2 = sum(1 for m in rep["merges"] if m["phase"] == "s2")
         merges_final = sum(1 for m in rep["merges"] if m["phase"] == "final")
         record["partition"] = dict(rep["partition"])
+        record["phase_within"] = dict(merges=merges_within,
+                                      clusters_after=rep.get("clusters_after_within"))
         record["phase_s1"] = dict(merges=merges_s1, conflicts=len(rep["conflicts"]),
                                   conflict_log=rep["conflicts"],
                                   clusters_after=rep["clusters_after_s1"])
@@ -357,8 +379,8 @@ class TrajRefine(VideoLevelModule):
         record["out_of_scope"] = rep["out_of_scope"]
         record["outputs"].update(
             tracklets=int(tracked_out["track_id"].nunique()),
-            merges=len(rep["merges"]), merges_s1=merges_s1, merges_s2=merges_s2,
-            merges_final=merges_final,
+            merges=len(rep["merges"]), merges_within=merges_within,
+            merges_s1=merges_s1, merges_s2=merges_s2, merges_final=merges_final,
             conflicts=len(rep["conflicts"]),
             rows_relabelled=int(n_relabel), rows_unassigned=n_unassigned,
             frame_collisions=coll, clusters_incoherent=n_incoherent)

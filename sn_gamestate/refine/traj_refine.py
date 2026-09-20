@@ -36,10 +36,22 @@ for label L is ``exp(mx(L)) * conf_sum(L)`` over the pooled frame decodes of
 the two recognisers. When two trajectories merge, the pooled statistics
 combine exactly per that rule -- ``mx = max``, ``conf_sum``/``votes`` add.
 
-THE MERGE RUNS IN THREE PHASES over a partition of the fragments by label
-knowledge (a fragment with NO cluster id -- possible only for the splitter's
-kept all-multi degenerates and for fragments whose sampled crops all failed to
-embed -- belongs to no partition and NEVER merges):
+Phase 0 (WITHIN-TRACKLET) runs FIRST, before the phases below. It re-merges
+fragments that came from the SAME source tracklet (the splitter's over-splits),
+using the cluster + number evidence the splitter did not have. Two same-source
+fragments merge when their team CLUSTER is equal and their numbers do not
+contradict: with the SAME known number, no distance threshold (rule A); with at
+least one number UNKNOWN, when the median-centroid distance <= tau (rule B).
+Two DIFFERENT known numbers never merge -- that is exactly the identity switch
+the splitter correctly separated. Same-tracklet single fragments are
+frame-disjoint by construction, so no clean-frame test is needed. The source
+tracklet is carried per fragment (``source_tid``, the splitter's
+``track_id_presplit``); a fragment with no source id skips this phase.
+
+THE CROSS-TRACKLET MERGE then RUNS IN THREE PHASES over a partition of the
+fragments by label knowledge (a fragment with NO cluster id -- possible only
+for the splitter's kept all-multi degenerates and for fragments whose sampled
+crops all failed to embed -- belongs to no partition and NEVER merges):
 
     S1  cluster known AND number known
     S2  cluster known AND number unknown
@@ -160,7 +172,8 @@ class _Cluster:
     """Mutable merge state of one (possibly merged) trajectory."""
 
     __slots__ = ("tids", "rows", "sum_clean", "n_clean", "clean_emb",
-                 "clean_frames", "cluster", "number", "cand", "scope", "banned")
+                 "clean_frames", "cluster", "number", "cand", "scope", "banned",
+                 "source_tid")
 
     def __init__(self, tid, rows, E, single, frames, info):
         self.tids = [int(tid)]
@@ -185,6 +198,8 @@ class _Cluster:
         self.cand = {str(c[0]): [float(c[1]), float(c[2]), int(c[3])]
                      for c in (info.get("cand") or [])}
         self.scope = bool(info.get("scope"))
+        st = info.get("source_tid")            # splitter's track_id_presplit; phase 0
+        self.source_tid = None if st is None else int(st)
         self.banned = set()
 
     @property
@@ -222,6 +237,9 @@ class _Cluster:
         self.number = self.number or other.number
         self.cand = combine_cand(self.cand, other.cand)
         self.banned |= other.banned
+        # phase 0 only merges same-source pairs; a cross-tracklet merge (S1/S2/
+        # FINAL) joins two sources, so the source id is no longer single -> None
+        self.source_tid = self.source_tid if self.source_tid == other.source_tid else None
 
 
 # ------------------------------------------------------------------ conditions
@@ -383,6 +401,49 @@ def _phase_final(clusters, frames, tau, report):
     _agglomerate(clusters, member, compat, frames, tau, "final", report)
 
 
+# ------------------------------------------------ phase 0 (within-tracklet)
+
+def _phase_within_tracklet(clusters, frames, tau, report):
+    """Phase 0 -- re-merge fragments of the SAME source tracklet, BEFORE any
+    cross-tracklet merging. Both fragments must share the team CLUSTER and their
+    numbers must not contradict: same known number -> merge with NO threshold
+    (rule A); >= 1 number UNKNOWN -> merge when the median-centroid distance
+    <= tau (rule B). Two DIFFERENT known numbers never merge (the splitter's
+    identity switch). Same-tracklet single fragments are frame-disjoint by
+    construction, so no clean-frame test is needed. Only in-scope, clustered
+    fragments with a known ``source_tid`` take part. Mutates ``clusters``."""
+    def eligible(c):
+        return c.scope and c.cluster is not None and c.source_tid is not None
+
+    # Rule A: union same-source + same-cluster + same known number (no threshold).
+    groups = {}
+    for k, c in clusters.items():
+        if eligible(c) and c.number is not None:
+            groups.setdefault((c.source_tid, c.cluster, c.number), []).append(k)
+    for gk in sorted(groups):
+        members = sorted(groups[gk])
+        keep = members[0]                      # smallest key survives (determinism)
+        for other in members[1:]:
+            report["merges"].append(dict(
+                phase="within", pair=[keep, other], distance=None,
+                cluster=clusters[keep].cluster, number=clusters[keep].number))
+            clusters[keep].absorb(clusters[other], frames)
+            del clusters[other]
+
+    # Rule B: closest same-source + same-cluster + >=1-unknown pair, dist <= tau
+    # (agglomerative; a discovered number propagates as clusters combine).
+    def compat(a, b):
+        if a.source_tid is None or a.source_tid != b.source_tid:
+            return False
+        if a.cluster != b.cluster:
+            return False
+        if a.number is not None and b.number is not None:   # both known: rule A's job
+            return False
+        return True
+
+    _agglomerate(clusters, eligible, compat, frames, tau, "within", report)
+
+
 # ------------------------------------------------------------------ stage 3
 
 def _stage3(clusters, E, single, frames, new_tid, report):
@@ -532,6 +593,8 @@ def refine_video(E, single, frames, tids, tracks, tau):
         unclustered=sum(1 for c in clusters.values()
                         if c.scope and c.cluster is None))
 
+    _phase_within_tracklet(clusters, frames, tau, report)
+    report["clusters_after_within"] = len(clusters)
     _phase_s1(clusters, frames, report)
     report["clusters_after_s1"] = len(clusters)
     _phase_s2(clusters, frames, tau, report)

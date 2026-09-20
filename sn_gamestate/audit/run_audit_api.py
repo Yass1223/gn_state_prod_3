@@ -1022,8 +1022,9 @@ class RunAudit(VideoLevelModule):
         that ran equal to the configured ones and to tracklet_split's checkpoint pin;
         tracked rows out equal tracked rows in minus the stage-3b unassigned count
         (the only way this stage drops a row); tracklets
-        after == tracklets before - merges (merges = S1 + S2 + final);
-        every accepted S2/final merge distance <= tau (S1 merges are label-driven
+        after == tracklets before - merges (merges = within + S1 + S2 + final);
+        every accepted within-rule-B/S2/final merge distance <= tau (S1 and the
+        within same-number merges are label-driven
         and carry no threshold -- their distance is informational and may be
         null); no (image_id, track_id) collision; number/team_cluster constant
         per final track; counts equal the sidecar's; disabled => everything
@@ -1032,8 +1033,8 @@ class RunAudit(VideoLevelModule):
                   "track_id_prerefine + jersey snapshots on every row; sidecar with the "
                   "settings and checkpoint that ran equal to the configured ones and to "
                   "tracklet_split's pin; tracked rows out == in - unassigned; tracklets_out == "
-                  "tracklets_in - merges; merges == S1 + S2 + final; S2/final merge "
-                  "distances <= tau (S1 has no threshold); one detection per frame "
+                  "tracklets_in - merges; merges == within + S1 + S2 + final; distance-gated "
+                  "(within-rule-B/S2/final) merges <= tau; one detection per frame "
                   "per trajectory; number/team_cluster constant per final track; "
                   "disabled => track_id and jersey columns untouched")
         exp = self.expected_traj_refine
@@ -1126,18 +1127,20 @@ class RunAudit(VideoLevelModule):
         n_trk_pre = int(tracked_prerefine["track_id"].nunique()) if len(tracked_prerefine) else 0
         n_trk_now = int(tracked["track_id"].nunique()) if len(tracked) else 0
         n_merges = int(outp.get("merges") or 0)
+        n_within = int(outp.get("merges_within") or 0)
         n_s1 = int(outp.get("merges_s1") or 0)
         n_s2 = int(outp.get("merges_s2") or 0)
         n_fin = int(outp.get("merges_final") or 0)
         c.observed.update(tracklets_before=n_trk_pre, tracklets_after=n_trk_now,
-                          merges=n_merges, merges_s1=n_s1, merges_s2=n_s2,
+                          merges=n_merges, merges_within=n_within,
+                          merges_s1=n_s1, merges_s2=n_s2,
                           merges_final=n_fin, conflicts=outp.get("conflicts"),
                           partition=data.get("partition"),
                           no_centroid=len(data.get("no_centroid") or []),
                           out_of_scope=data.get("out_of_scope"))
-        if n_merges != n_s1 + n_s2 + n_fin:
-            c.set(FAIL, f"merges ({n_merges}) != S1 ({n_s1}) + S2 ({n_s2}) + "
-                        f"final ({n_fin})")
+        if n_merges != n_within + n_s1 + n_s2 + n_fin:
+            c.set(FAIL, f"merges ({n_merges}) != within ({n_within}) + S1 ({n_s1}) + "
+                        f"S2 ({n_s2}) + final ({n_fin})")
         if int(inp.get("tracklets") or 0) != n_trk_pre:
             c.set(FAIL, f"sidecar received {inp.get('tracklets')} tracklets, the snapshot "
                         f"holds {n_trk_pre}")
@@ -1149,27 +1152,28 @@ class RunAudit(VideoLevelModule):
                         f"merges ({n_merges})")
         tau = exp.get("tau")
         mlog = data.get("merge_log") or []
-        by_phase = {"s1": [], "s2": [], "final": []}
+        by_phase = {"within": [], "s1": [], "s2": [], "final": []}
         for m in mlog:
             ph = m.get("phase")
             if ph not in by_phase:
                 c.set(FAIL, f"merge with unknown phase {ph!r} in the merge log")
             else:
                 by_phase[ph].append(m)
-        for ph, want in (("s1", n_s1), ("s2", n_s2), ("final", n_fin)):
+        for ph, want in (("within", n_within), ("s1", n_s1), ("s2", n_s2), ("final", n_fin)):
             if len(by_phase.get(ph, [])) != want:
                 c.set(FAIL, f"{len(by_phase.get(ph, []))} {ph} merges in the log, "
                             f"the sidecar reports {want}")
-        # S2 and final merges are distance-gated; S1 merges are label-driven
-        # (no threshold, distance informational and possibly null).
-        gated = [m.get("distance") for m in by_phase["s2"] + by_phase["final"]]
-        if any(d is None for d in gated):
+        # S2/final and within-rule-B merges are distance-gated (<= tau); S1 and
+        # within same-number (rule A) merges are label-driven, distance null.
+        if any(m.get("distance") is None for m in by_phase["s2"] + by_phase["final"]):
             c.set(FAIL, "an S2/final merge carries no distance")
-        gated = [d for d in gated if d is not None]
+        gated = [m.get("distance") for m in
+                 by_phase["within"] + by_phase["s2"] + by_phase["final"]
+                 if m.get("distance") is not None]
         if gated:
             c.observed["merge_distance_max_gated"] = round(float(max(gated)), 4)
             if tau is not None and max(gated) > float(tau) + 1e-6:
-                c.set(FAIL, f"an S2/final merge was accepted at distance "
+                c.set(FAIL, f"a distance-gated merge was accepted at distance "
                             f"{max(gated):.4f} > tau {tau}")
         if int(outp.get("frame_collisions") or 0) or int(outp.get("clusters_incoherent") or 0):
             c.set(FAIL, f"the stage reported {outp.get('frame_collisions')} frame "
