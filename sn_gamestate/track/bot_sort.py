@@ -21,8 +21,10 @@ Three inversions of control, all deliberate and all matching the reference:
   constructor is checked to have built a real `SOF` before the feed replaces it, so a
   wrong `cmc_method` fails loudly instead of silently disabling compensation.
 * **No confidence pre-filter.** boxmot's own split is the only floor. The detector's
-  `conf` already floors at 0.1 and `track_low_thresh` is below that, so an extra
-  `min_confidence` gate would be a second, redundant threshold.
+  `conf` already floors the feed (`min_confidence`, currently 0.35) and
+  `track_low_thresh` is below that, so an extra `min_confidence` gate here would be a
+  second, redundant threshold. (At a 0.35 detector floor -- above `track_high_thresh`
+  0.3 -- every detection lands in BYTE's high band and the low band is empty.)
 
 Two details that are easy to get wrong
 --------------------------------------

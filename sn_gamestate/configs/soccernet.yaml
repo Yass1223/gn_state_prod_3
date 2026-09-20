@@ -39,8 +39,9 @@
 #   role_team      per-TRAJECTORY roles and sides, AFTER the merge, recomputed from
 #                  CLEAN crops (all statistics over SINGLE rows; the decided labels
 #                  WRITTEN on all rows of the trajectory): osnet_team descriptors per trajectory; outliers by
-#                  2-means + MAD rule and a trajectory-level DBSCAN (unrelated to the
-#                  splitter's); assistants FIRST (no jersey number; no position
+#                  MUTUAL REACHABILITY of the 2-means team cores
+#                  (appearance_outliers_plain_v2, sole parameter link_k --
+#                  replaces the MAD rule + DBSCAN channels); assistants FIRST (no jersey number; no position
 #                  threshold; one per touchline, up to two with opposite mean y),
 #                  geometry-first; goalkeepers geometry + depth > gk_rel * max
 #                  non-assistant |mean x| + min_n positions; main referee =

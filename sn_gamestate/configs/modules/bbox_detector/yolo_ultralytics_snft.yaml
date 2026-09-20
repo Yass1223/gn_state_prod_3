@@ -5,8 +5,11 @@
 # which the stock wrapper would introduce because it calls `model(images, verbose=False)`
 # with ultralytics defaults:
 #   * imgsz: stock 640 -> 1280 (notebook INFER_IMGSZ). Materially different on small players.
-#   * conf floor: stock 0.25 -> min_confidence 0.1 (notebook fed the tracker at a low floor,
-#     so BoT-SORT's BYTE low band reaches the tracker). Filtered with `>=` (keep the floor).
+#   * conf floor: stock 0.25 -> min_confidence 0.35. Filtered with `>=` (keep the floor).
+#     NOTE: 0.35 is ABOVE the tracker's track_high_thresh (0.3), so every detection that
+#     reaches BoT-SORT lands in the BYTE high band; the low band [track_low_thresh, 0.3]
+#     receives nothing (raised from the notebook's 0.1 low floor -- BYTE's low-score
+#     second association is effectively disabled at this floor).
 #   * colour: tracklab passes RGB numpy arrays but ultralytics assumes BGR for numpy input;
 #     the subclass converts RGB->BGR before predict (the notebook passed file paths, so
 #     ultralytics loaded BGR itself).
@@ -20,7 +23,7 @@ _target_: sn_gamestate.bbox_detector.yolo_snft_api.YOLOUltralyticsSNFT
 batch_size: 4
 cfg:
   path_to_checkpoint: ${hf:${hf_weights_repo},yolov11_sn_best.pt}
-  min_confidence: 0.1
+  min_confidence: 0.35
   imgsz: 1280
   iou: 0.7
   max_det: 300

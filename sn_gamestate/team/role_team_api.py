@@ -24,25 +24,27 @@ the visualization):
    on the stride grid, at most ``crops_per_track`` evenly spaced, embedded
    with ``osnet_team``; descriptor = L2-normalised median of the embedded
    crops (float32). A trajectory with no single crop has no descriptor.
-3. Outlier channels over the descriptors (this stage's own machinery,
-   unrelated to the splitter's per-tracklet DBSCAN):
+3. APPEARANCE OUTLIERS over the descriptors by MUTUAL REACHABILITY of the
+   team clusters (``appearance_outliers_plain_v2`` -- ONE rule replacing
+   the previous MAD-threshold and DBSCAN channels; its single free
+   parameter is the neighbour count ``link_k``):
      * 2-means (the notebook's seeded k-means); ``d`` = Euclidean distance
-       to the nearer centroid; the robust rule flags ``d > m + k*s``
-       (m = median, s = MAD of d; disabled when ``s < 0.05*m``). ROBUST
-       REFIT: the first fit's centroids are pulled by the very outliers the
-       rule must catch, so after the first pass the two centroids are refit
-       on the UNFLAGGED descriptors only, every trajectory is re-measured
-       against them, and the rule is applied once more; the final rule
-       flags are the UNION of the two passes (the refit can only add,
-       never remove -- the recall objective). One deterministic iteration;
-       skipped when the first pass flags nothing or fewer than two
-       descriptors would remain.
-     * DBSCAN on cosine distance over ALL descriptors together (eps = knee
-       of the kth-neighbour curve times ``dbscan_scale``, ``min_samples`` =
-       ``dbscan_min``); a trajectory DBSCAN labels noise is flagged. The
-       channel is independent of the refit.
-   A trajectory flagged by EITHER channel is an OUTLIER; the flagged
-   trajectories are grouped (``outlier_group`` in the sidecar).
+       to the nearer centroid (= the own team's centroid).
+     * TEAM CORES: per team b, ``mu_b``/``s_b`` = median/MAD (floored) of
+       the members' centroid distances; the core ``K_b`` holds the members
+       with ``d <= mu_b + s_b`` -- the certain team members, inliers by
+       definition (the k-means assignment only supplies the distances,
+       never legitimacy).
+     * PER-TRACKLET RADIUS: ``mu_i``/``s_i`` = median/MAD (floored) of
+       tracklet i's ``link_k`` nearest-neighbour distances;
+       ``R_i = mu_i + s_i`` -- small in dense regions, wide in sparse ones.
+     * MUTUAL COMPATIBILITY: i and j are compatible iff
+       ``||z_i - z_j|| <= min(R_i, R_j)`` -- the connection must be
+       agreeable from both sides.
+     * A trajectory is an OUTLIER iff NO chain of mutually compatible
+       tracklets links it to ``K_0`` or ``K_1``. Skipped (nothing flagged)
+       when ``n_desc <= link_k + 1``. The flagged trajectories are grouped
+       (``outlier_group`` in the sidecar).
 4. ASSISTANT referees FIRST, GEOMETRY FIRST: candidates carry NO jersey
    number, hug a touchline (|mean y| >= tau_a * max|mean y|, y-std <=
    tau_a_sy) AND carry a descriptor -- there is NO sampled-position
@@ -59,7 +61,7 @@ the visualization):
    condition on acceptance. The
    geometric best (largest |mean y|) wins outright when it leads the
    runner-up by at least ``a_tie_m``; otherwise, over the tied set (every
-   candidate within ``a_tie_m`` of the best): with no MAD/DBSCAN-flagged
+   candidate within ``a_tie_m`` of the best): with no outlier-flagged
    candidate, the one farthest from both 2-means centroids; with flagged
    candidates, the geometric best among the flagged, and the farthest
    among them when they are again tied. A flagged winner is REMOVED from
@@ -111,7 +113,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.cluster import DBSCAN
 
 from tracklab.pipeline.videolevel_module import VideoLevelModule
 from tracklab.utils.cv2 import cv2_load_image
@@ -123,7 +124,10 @@ from sn_gamestate.team.team_embed_api import frame_index, sequence_name
 log = logging.getLogger(__name__)
 
 TEAM_NAMES = {0: "left", 1: "right"}
-DEFAULTS = dict(k=3.25, dbscan_min=4, dbscan_scale=1.5,
+S_FLOOR = 1e-6      # floor on every MAD in the outlier rule (degenerate cases:
+                    # a vanishing spread must not, by itself, unlink a tracklet
+                    # or shrink a team core to the median alone)
+DEFAULTS = dict(link_k=4,
                 tau_a=0.9, tau_a_sy=3.0,
                 side_rule="keeper", band=0.9, gk_depth_m=2.0, a_tie_m=1.5,
                 min_n=10, gk_rel=0.85)
@@ -181,7 +185,7 @@ def _pick_candidate(cand, fitness, d, flagged, tie_margin):
 
     ``cand``: candidate indices; ``fitness``: geometric fitness per index
     (larger = better; goalkeeper depth |mean x|, assistant |mean y|);
-    ``d``: distance to the nearer 2-means centroid; ``flagged``: MAD-or-DBSCAN
+    ``d``: distance to the nearer 2-means centroid; ``flagged``: appearance
     outlier flag per index; ``tie_margin``: geometric indistinguishability (m).
 
     The geometric best wins outright when it leads the runner-up by at least
@@ -221,6 +225,73 @@ def _pick_candidate(cand, fitness, d, flagged, tie_margin):
     return farthest(top), rec
 
 
+def appearance_outliers(E, lab, d, link_k, s_floor=S_FLOOR):
+    """Appearance outliers by MUTUAL REACHABILITY of the team clusters
+    (``appearance_outliers_plain_v2``) -- the single rule replacing the
+    previous MAD-threshold and DBSCAN channels.
+
+    ``E`` (m, dim) descriptors, ``lab`` (m,) their 2-means team assignment,
+    ``d`` (m,) each descriptor's Euclidean distance to its own (nearer)
+    centroid, ``link_k`` the neighbour count -- the rule's ONE parameter.
+
+    TEAM CORES: ``K_b = { i in T_b : d_i <= mu_b + s_b }`` with ``mu_b``/
+    ``s_b`` the median/MAD (floored at ``s_floor``) of the members' centroid
+    distances -- the certain team members, inliers by definition (the k-means
+    assignment only supplies the distances, never legitimacy). PER-TRACKLET
+    RADIUS: ``R_i = mu_i + s_i`` from the median/MAD (floored) of tracklet
+    i's ``link_k`` nearest-neighbour distances. MUTUAL COMPATIBILITY:
+    ``||z_i - z_j|| <= min(R_i, R_j)``. A tracklet is an OUTLIER iff no
+    chain of mutually compatible tracklets links it to ``K_0`` or ``K_1``.
+    Skipped (nothing flagged) when ``m <= link_k + 1``.
+
+    Returns ``(outlier, radius, core, info)`` aligned to the m descriptors;
+    ``info`` is the sidecar record (rule name, n_desc, link_k, skipped,
+    per-team size/mu/s/core, n_linked)."""
+    m = int(len(E))
+    link_k = int(link_k)
+    outlier = np.zeros(m, bool)
+    radius = np.full(m, np.nan)
+    core = np.zeros(m, bool)
+    info = dict(rule="appearance_outliers_plain_v2", n_desc=m,
+                link_k=link_k, skipped=False, teams=[], n_linked=None)
+    if m <= link_k + 1:
+        info["skipped"] = True
+        return outlier, radius, core, info
+    lab = np.asarray(lab, dtype=int)
+    d = np.asarray(d, dtype=float)
+    for b in (0, 1):                       # team cores by the median rule
+        sel = lab == b
+        if not sel.any():
+            info["teams"].append(dict(team=b, size=0, mu=None, s=None, core=0))
+            continue
+        mu_b = float(np.median(d[sel]))
+        s_b = max(float(np.median(np.abs(d[sel] - mu_b))), float(s_floor))
+        core[sel] = d[sel] <= mu_b + s_b
+        info["teams"].append(dict(team=b, size=int(sel.sum()),
+                                  mu=round(mu_b, 6), s=round(s_b, 6),
+                                  core=int(core[sel].sum())))
+    Ed = np.asarray(E, dtype=np.float64)
+    delta = np.linalg.norm(Ed[:, None] - Ed[None], axis=2)
+    np.fill_diagonal(delta, np.inf)
+    knn = np.sort(delta, axis=1)[:, :link_k]   # k nearest-neighbour distances
+    mu_i = np.median(knn, axis=1)
+    s_i = np.maximum(np.median(np.abs(knn - mu_i[:, None]), axis=1),
+                     float(s_floor))
+    radius = mu_i + s_i
+    compat = delta <= np.minimum(radius[:, None], radius[None, :])
+    linked = core.copy()                   # every chain must END in a core
+    frontier = core.copy()
+    while frontier.any():                  # BFS over the mutual-compat graph
+        reach = compat[frontier].any(axis=0) & ~linked
+        if not reach.any():
+            break
+        linked |= reach
+        frontier = reach
+    outlier = ~linked
+    info["n_linked"] = int(linked.sum())
+    return outlier, radius, core, info
+
+
 class RoleTeamAssignment(VideoLevelModule):
     input_columns = ["track_id", "image_id", "bbox_ltwh", "bbox_pitch",
                      "crop_single", "jersey_number_detection"]
@@ -241,7 +312,8 @@ class RoleTeamAssignment(VideoLevelModule):
             self.audit_dir.mkdir(parents=True, exist_ok=True)
         self.model = None      # osnet_team, built on first use (weights at run time)
         log.info(f"[role_team] per-trajectory roles and sides AFTER traj_refine, "
-                 f"recomputed from clean crops (osnet_team + 2-means/MAD + DBSCAN); "
+                 f"recomputed from clean crops (osnet_team + 2-means cores + "
+                 f"mutual-reachability appearance outliers); "
                  f"assistants first (no jersey number), main referee no-number, "
                  f"goalkeeper depth > gk_rel * max non-assistant |mean x|; computed "
                  f"from single rows, written on all rows of the trajectory; "
@@ -385,66 +457,26 @@ class RoleTeamAssignment(VideoLevelModule):
         E = (np.stack([desc[tids[j]] for j in e_idx])
              if len(e_idx) else np.zeros((0, 0), np.float32))
 
-        # --- 3. outlier channels: 2-means + MAD rule, and global DBSCAN ----
+        # --- 3. appearance outliers: mutual reachability of the team cores
+        # (appearance_outliers_plain_v2 -- the ONE rule replacing the
+        # MAD-threshold and DBSCAN channels; sole parameter: link_k)
         d = np.full(n, np.nan)                 # distance to the nearer centroid
-        out_rule = np.zeros(n, bool)
-        out_db = np.zeros(n, bool)
-        m = s = None
-        s_ok = False
-        eps = None
-        km = None
-        dbscan_rec = dict(ran=False, n_desc=int(len(e_idx)), n_noise=0)
-        mad_refit = dict(refit_ran=False, flags_first_pass=0, flags_refit=None,
-                         flags_final=0, m_first=None, s_first=None,
-                         s_ok_first=False, m_refit=None, s_refit=None,
-                         s_ok_refit=None)
+        outlier = np.zeros(n, bool)
+        in_core = np.zeros(n, bool)
+        radius_g = np.full(n, np.nan)
+        ao_rec = dict(rule="appearance_outliers_plain_v2",
+                      n_desc=int(len(e_idx)), link_k=int(P["link_k"]),
+                      skipped=True, teams=[], n_linked=None)
         if len(e_idx) >= 2:
             km = rules.kmeans2(E)
             d_all = np.linalg.norm(E[:, None] - km.cluster_centers_[None], axis=2)
-            d[e_idx] = d_all.min(1)
-            m = float(np.median(d[e_idx]))
-            s = float(np.median(np.abs(d[e_idx] - m)))
-            s_ok = s >= 0.05 * m
-            if s_ok:
-                out_rule[e_idx] = d[e_idx] > m + P["k"] * s
-            mad_refit.update(flags_first_pass=int(out_rule.sum()),
-                             m_first=_f(m), s_first=_f(s), s_ok_first=bool(s_ok))
-            # Robust refit: the first fit's centroids are pulled by the very
-            # outliers the rule must catch (their d shrinks, the MAD
-            # inflates, the threshold rises). Refit the two centroids on the
-            # UNFLAGGED descriptors only, re-measure EVERY trajectory
-            # against them, apply the rule once more, and take the UNION of
-            # the two passes (monotone: the refit can only add flags). One
-            # deterministic iteration; skipped when nothing was flagged or
-            # fewer than two descriptors would remain. The DBSCAN channel
-            # below is independent of the refit.
-            mask_keep = ~out_rule[e_idx]
-            if out_rule.any() and int(mask_keep.sum()) >= 2:
-                km_r = rules.kmeans2(E[mask_keep])
-                d_all = np.linalg.norm(E[:, None] - km_r.cluster_centers_[None], axis=2)
-                d[e_idx] = d_all.min(1)
-                m = float(np.median(d[e_idx]))
-                s = float(np.median(np.abs(d[e_idx] - m)))
-                s_ok = s >= 0.05 * m
-                refit_flags = np.zeros(n, bool)
-                if s_ok:
-                    refit_flags[e_idx] = d[e_idx] > m + P["k"] * s
-                out_rule = out_rule | refit_flags
-                mad_refit.update(refit_ran=True,
-                                 flags_refit=int(refit_flags.sum()),
-                                 m_refit=_f(m), s_refit=_f(s),
-                                 s_ok_refit=bool(s_ok))
-            mad_refit["flags_final"] = int(out_rule.sum())
-        if len(e_idx) >= 4:
-            # one DBSCAN over ALL descriptors together (the notebook's
-            # channel): eps = knee of the kth-neighbour curve * dbscan_scale;
-            # any trajectory labelled noise is flagged.
-            eps = max(1e-3, rules.knee_eps(E) * P["dbscan_scale"])
-            lab_db = DBSCAN(eps=eps, min_samples=int(P["dbscan_min"]),
-                            metric="cosine").fit_predict(E)
-            out_db[e_idx[lab_db == -1]] = True
-            dbscan_rec.update(ran=True, n_noise=int((lab_db == -1).sum()))
-        outlier = out_rule | out_db            # flagged by either channel
+            d[e_idx] = d_all.min(1)            # kept: the selection tie-breaks read it
+            lab_km = d_all.argmin(1)           # the assignment T_0/T_1
+            out_l, rad_l, core_l, ao_rec = appearance_outliers(
+                E, lab_km, d[e_idx], P["link_k"])
+            outlier[e_idx] = out_l
+            in_core[e_idx] = core_l
+            radius_g[e_idx] = rad_l
         in_pool = outlier.copy()               # the outlier group; geometry roles leave it
 
         # --- 4. assistants: geometry candidates + descriptor, one per side -
@@ -604,7 +636,7 @@ class RoleTeamAssignment(VideoLevelModule):
                 track_id=t["tid"], role=str(role[j]), why=str(why[j]),
                 team=team[j], number=t["number"], has_embedding=bool(has_e[j]),
                 cluster=(_f(lab[j]) if np.isfinite(lab[j]) else None),
-                out_rule=bool(out_rule[j]), out_db=bool(out_db[j]),
+                in_core=bool(in_core[j]), radius=_f(radius_g[j]),
                 outlier=bool(outlier[j]), d=_f(d[j]),
                 n=t["n"], mx=_f(t["mx"]), my=_f(t["my"]), sy=_f(t["sy"]),
                 q75=_f(t["q75"]), ymax=_f(t["ymax"]), ymin=_f(t["ymin"])))
@@ -617,13 +649,10 @@ class RoleTeamAssignment(VideoLevelModule):
             n_multi_rows_labelled=int(n_multi_labelled),
             main_referee=(T[main_ref]["tid"] if main_ref is not None else None),
             main_referee_rule=main_rule,
-            dbscan_eps=_f(eps), dbscan=dbscan_rec,
+            appearance_outliers=ao_rec,
             gk_selection=gk_selection, assistant_selection=assistant_selection,
             assistant_pair_appearance_d=(_f(assistant_pair_d)
                                          if assistant_pair_d is not None else None),
-            mad_refit=mad_refit,
-            distance_median=_f(m), distance_mad=_f(s),
-            s_ok=bool(s_ok),
             outlier_group=outlier_group, n_outlier=len(outlier_group),
             n_outlier_geometry_kept=int(n_geom_kept),
             n_outlier_players=int(sum(1 for j in players if outlier[j])),

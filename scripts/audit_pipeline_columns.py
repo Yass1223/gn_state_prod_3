@@ -21,7 +21,8 @@ Four audits, each a section in the report:
                 tracklet_agg voting. Every drop between hops is reported.
 3. TEAM/ROLE -- per tracklet from the role_team sidecar: the geometry inputs
                 (mx/my/sx/sy/q75, n, single-crop count, embedding present), the
-                decision (why), the outlier evidence (out_rule/out_db/z/confirmed),
+                decision (why), the outlier evidence (mutual-reachability rule:
+                outlier/in_core/radius, appearance_outliers record),
                 and the team with the naming cue that decided the sides. Structural
                 invariants enforced (referee has no team; player/GK has one; role
                 in {player,goalkeeper,referee}).
@@ -390,23 +391,21 @@ def audit_team_role(det, role_team_dir, team_embed_dir, img):
         for t in per:
             reasons[t.get("why")] = reasons.get(t.get("why"), 0) + 1
         c.observed["role_reasons"] = reasons
-        # outlier evidence summary
-        n_rule = sum(1 for t in per if t.get("out_rule"))
-        n_db = sum(1 for t in per if t.get("out_db"))
-        n_conf = sum(1 for t in per if t.get("confirmed"))
-        c.observed.update(outlier_by_distance_rule=n_rule, outlier_by_dbscan=n_db,
-                          outliers_confirmed=n_conf,
-                          distance_median=lvl.get("distance_median"),
-                          distance_mad=lvl.get("distance_mad"), s_ok=lvl.get("s_ok"),
-                          dbscan_eps=lvl.get("dbscan_eps"))
+        # outlier evidence summary (appearance_outliers_plain_v2: mutual
+        # reachability of the team cores -- single rule, no channels)
+        n_out = sum(1 for t in per if t.get("outlier"))
+        n_core = sum(1 for t in per if t.get("in_core"))
+        c.observed.update(outliers=n_out, core_members=n_core,
+                          appearance_outliers=lvl.get("appearance_outliers"))
         # team naming: which cue decided the left side
         c.observed.update(named_left_cluster=lvl.get("named_left_cluster"),
                           naming_cues=lvl.get("cues"),
                           counts=dict(player=lvl.get("n_player"), goalkeeper=lvl.get("n_goalkeeper"),
                                       referee=lvl.get("n_referee"),
                                       left=lvl.get("n_left"), right=lvl.get("n_right")))
-        if lvl.get("s_ok") is False:
-            c.set(WARN, "distance rule disabled (degenerate embedding-distance spread)")
+        ao = lvl.get("appearance_outliers") or {}
+        if ao.get("skipped"):
+            c.set(WARN, "appearance-outlier rule skipped (n_desc <= link_k + 1)")
         # invariants against the sidecar itself
         bad_role = [t for t in per if t.get("role") not in VALID_ROLES]
         ref_team = [t for t in per if t.get("role") == "referee" and t.get("team") in ("left", "right")]

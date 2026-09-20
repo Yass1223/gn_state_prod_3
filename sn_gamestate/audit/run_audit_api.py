@@ -1384,7 +1384,8 @@ class RunAudit(VideoLevelModule):
                   "assistant per side and one goalkeeper per half (algorithm "
                   "invariants); parameters that ran equal "
                   "the configured ones (appearance recomputed from clean crops: 2-means "
-                  "+ MAD rule + DBSCAN); sidecar covers every trajectory; outlier group "
+                  "cores + mutual-reachability appearance outliers, "
+                  "appearance_outliers_plain_v2); sidecar covers every trajectory; outlier group "
                   "and fallback counts consistent. Scene composition (team/keeper "
                   "counts) is recorded as information only, never a verdict")
         for col in ("role", "team", "crop_single"):
@@ -1453,8 +1454,7 @@ class RunAudit(VideoLevelModule):
                            "cues": lvl.get("cues"), "band_2_14": lvl.get("band"),
                            "main_referee": lvl.get("main_referee"),
                            "main_referee_rule": lvl.get("main_referee_rule"),
-                           "dbscan_eps": lvl.get("dbscan_eps"),
-                           "dbscan": lvl.get("dbscan"),
+                           "appearance_outliers": lvl.get("appearance_outliers"),
                            "gk_selection": lvl.get("gk_selection"),
                            "assistant_selection": lvl.get("assistant_selection"),
                            "n_outlier": lvl.get("n_outlier"),
@@ -1498,42 +1498,31 @@ class RunAudit(VideoLevelModule):
             c.set(FAIL, "outlier_group disagrees with the per-trajectory outlier flags")
         if group is not None and int(lvl.get("n_outlier") or 0) != len(group):
             c.set(FAIL, "n_outlier disagrees with the outlier_group length")
-        # global DBSCAN bookkeeping: one DBSCAN over all descriptors. The
-        # sidecar's noise count must equal the per-trajectory out_db flags
-        # (so the record cannot disagree with the flags it fed into
-        # outlier_group), stay within the descriptor count, and no out_db
-        # flag may exist when the channel did not run.
-        db = lvl.get("dbscan")
-        if db is not None:
-            n_out_db = sum(1 for r in per if r.get("out_db"))
-            n_noise = int(db.get("n_noise") or 0)
-            n_desc = int(db.get("n_desc") or 0)
-            if n_noise > n_desc:
-                c.set(FAIL, f"DBSCAN noise ({n_noise}) > descriptors ({n_desc})")
-            if n_noise != n_out_db:
-                c.set(FAIL, f"DBSCAN noise ({n_noise}) disagrees with the "
-                            f"per-trajectory out_db flags ({n_out_db})")
-            if not db.get("ran") and n_out_db:
-                c.set(FAIL, f"{n_out_db} out_db flag(s) although DBSCAN did not run")
-        # robust-refit MAD channel bookkeeping: the final rule flags are the
-        # UNION of the first pass and the refit pass (monotone -- the refit
-        # can only add), and the sidecar's counts must agree with the
-        # per-trajectory out_rule flags.
-        mr = lvl.get("mad_refit")
-        if mr is not None:
-            c.observed["mad_refit"] = mr
-            n_out_rule = sum(1 for r in per if r.get("out_rule"))
-            if int(mr.get("flags_final") or 0) != n_out_rule:
-                c.set(FAIL, f"mad_refit.flags_final ({mr.get('flags_final')}) disagrees with "
-                            f"the per-trajectory out_rule flags ({n_out_rule})")
-            if int(mr.get("flags_final") or 0) < int(mr.get("flags_first_pass") or 0):
-                c.set(FAIL, "mad_refit.flags_final < flags_first_pass: the refit removed a "
-                            "rule flag (the union must be monotone)")
-            if not mr.get("refit_ran"):
-                if mr.get("m_refit") is not None or mr.get("flags_refit") is not None:
-                    c.set(FAIL, "mad_refit reports refit statistics although the refit did not run")
-                if int(mr.get("flags_final") or 0) != int(mr.get("flags_first_pass") or 0):
-                    c.set(FAIL, "refit did not run but flags_final != flags_first_pass")
+        # mutual-reachability outlier bookkeeping (appearance_outliers_plain_v2,
+        # the single rule that replaced the DBSCAN and MAD channels): flags
+        # exist only when the rule ran, never exceed the descriptor count,
+        # linked + flagged partitions the descriptors, and a team-core member
+        # (a certain team member, inlier by definition) is never flagged.
+        ao = lvl.get("appearance_outliers")
+        if ao is not None:
+            n_flag = sum(1 for r in per if r.get("outlier"))
+            n_desc = int(ao.get("n_desc") or 0)
+            if ao.get("skipped"):
+                if n_flag:
+                    c.set(FAIL, f"{n_flag} outlier flag(s) although the rule was "
+                                f"skipped (n_desc <= link_k + 1)")
+            else:
+                if n_flag > n_desc:
+                    c.set(FAIL, f"outlier flags ({n_flag}) > descriptors ({n_desc})")
+                if ao.get("n_linked") is not None \
+                        and int(ao["n_linked"]) + n_flag != n_desc:
+                    c.set(FAIL, f"linked ({ao['n_linked']}) + outlier flags "
+                                f"({n_flag}) != descriptors ({n_desc})")
+                n_core_flagged = sum(1 for r in per
+                                     if r.get("in_core") and r.get("outlier"))
+                if n_core_flagged:
+                    c.set(FAIL, f"{n_core_flagged} team-core member(s) flagged as "
+                                f"outlier (cores are inliers by definition)")
         # fallback consistency: sidecar counts vs the recorded reasons
         if int(lvl.get("n_fallback_half") or 0) != reasons.get("player_half_fallback", 0):
             c.set(FAIL, "fallback count n_fallback_half disagrees with the per-trajectory reasons")

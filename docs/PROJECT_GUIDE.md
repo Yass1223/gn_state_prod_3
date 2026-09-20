@@ -102,7 +102,7 @@ Execution order is defined by `pipeline:` in `sn_gamestate/configs/soccernet.yam
   - `_target_ = sn_gamestate.bbox_detector.yolo_snft_api.YOLOUltralyticsSNFT`
   - `batch_size = 4` — images per inference batch.
   - `cfg.path_to_checkpoint = ${hf:Ynniss/YOLOv11L_HM,best.zip,yolov11l_hm_best.pt}` — HM fine-tune weights (baseline uses `${hf:${hf_weights_repo},yolov11_sn_best.pt}`).
-  - `cfg.min_confidence = 0.1` — confidence floor for the ultralytics `conf` arg and the post-filter.
+  - `cfg.min_confidence = 0.35` — confidence floor for the ultralytics `conf` arg and the post-filter (above the tracker's `track_high_thresh` 0.3, so every detection reaches BoT-SORT in the BYTE high band).
   - `cfg.imgsz = 1280` — inference image size.
   - `cfg.iou = 0.7` — NMS IoU threshold.
   - `cfg.max_det = 300` — maximum detections per image.
@@ -264,14 +264,12 @@ Execution order is defined by `pipeline:` in `sn_gamestate/configs/soccernet.yam
 - **Files:**
   - `sn_gamestate/team/role_team_api.py` — active role_team stage.
   - `sn_gamestate/team/rules.py` — shared rule/helper library (see §5).
-- **Key classes/functions:** `RoleTeamAssignment(VideoLevelModule)` with `.process` (7-step chain: geometry, descriptors, outlier channels, assistants, goalkeepers, main referee, sides), `._descriptors`, `._model`, `._write`; helpers `_pick_candidate`, `_cues`, `_pitch_xy`, `_f`; `TEAM_NAMES={0:left,1:right}`, `DEFAULTS`. Roles ∈ {player, goalkeeper, referee}; team ∈ {left, right} (None for referees); everything computed from SINGLE crops and written to all rows.
+- **Key classes/functions:** `RoleTeamAssignment(VideoLevelModule)` with `.process` (7-step chain: geometry, descriptors, appearance-outlier rule, assistants, goalkeepers, main referee, sides), `._descriptors`, `._model`, `._write`; helpers `appearance_outliers` (mutual-reachability outlier rule), `_pick_candidate`, `_cues`, `_pitch_xy`, `_f`; `TEAM_NAMES={0:left,1:right}`, `DEFAULTS`. Roles ∈ {player, goalkeeper, referee}; team ∈ {left, right} (None for referees); everything computed from SINGLE crops and written to all rows.
 - **Config:** `sn_gamestate/configs/modules/role_team/rules.yaml`
   - `_target_ = sn_gamestate.team.RoleTeamAssignment`
   - `cfg.team_repo = Ynniss/osnet_team`, `cfg.team_file = osnet_team_best.pt`, `cfg.team_revision = null`, `cfg.team_sha256 = null`, `cfg.team_local_path = null` — osnet_team checkpoint.
   - `cfg.pos_stride = 5`, `cfg.crops_per_track = 16`, `cfg.batch_size = 128`, `cfg.audit_dir = ${project_dir}/audit/role_team`.
-  - `cfg.params.k = 3.25` — outlier threshold multiplier (`d > median + k*MAD`).
-  - `cfg.params.dbscan_min = 4` — DBSCAN min_samples for the global cosine outlier channel.
-  - `cfg.params.dbscan_scale = 1.5` — scale on the knee-derived DBSCAN eps.
+  - `cfg.params.link_k = 4` — neighbour count of the mutual-reachability appearance-outlier rule (`appearance_outliers_plain_v2`, its ONE parameter): team cores = members with `d ≤ median + MAD` of centroid distances; per-tracklet radius `R_i = median + MAD` of its `link_k` NN distances; outlier ⟺ no mutually-compatible chain (`δᵢⱼ ≤ min(Rᵢ, Rⱼ)`) reaches either core; skipped when `n_desc ≤ link_k + 1`.
   - `cfg.params.tau_a = 0.9` — assistant candidate: `|mean y| >= tau_a * max|mean y|`.
   - `cfg.params.tau_a_sy = 3.0` — assistant candidate max y-std (m).
   - `cfg.params.side_rule = keeper` — side-naming cue chain.

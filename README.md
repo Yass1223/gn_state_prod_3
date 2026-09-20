@@ -10,7 +10,7 @@ bbox_detector -> track -> crop_filter -> calibration -> pitch_gate -> tracklet_s
 
 | Stage | Implementation | Notes |
 |---|---|---|
-| `bbox_detector` | YOLO11-L SoccerNet fine-tune | imgsz 1280, conf floor 0.1 (`>=`), RGB→BGR fix |
+| `bbox_detector` | YOLO11-L SoccerNet fine-tune | imgsz 1280, conf floor 0.35 (`>=`), RGB→BGR fix |
 | `track` | BoT-SORT · SOF + OSNet-AIN (boxmot) | calls boxmot's `BotSort` directly with injected embeddings and external SOF camera motion; per-frame diagnostics sidecar for the audit |
 | `crop_filter` | single / multi label per detection, tracked-only rule | rT ≤ 0.25, rB < 0.40; only boxes carrying a `track_id` may make another box multi; every detection gets `crop_single`/`crop_rT`/`crop_rB`/`crop_trigger`; no detection is removed |
 | `tracklet_split` | DBSCAN tracklet splitting (SPLIT ONLY), after the gate | same OSNet-AIN as the tracker (shared module, same checkpoint pin and precision, audit-enforced); runs on on-pitch tracklets only; per tracklet, DBSCAN over ALL detections; noise attaches to the nearest clean-only centroid; all-multi fragments dissolve into the nearest remaining fragment; `eps 0.2, min_samples 5`, deliberately NO merge threshold (the pipeline's one merge is `traj_refine`); every tracked detection stays assigned; the incoming id is kept in `track_id_presplit`; per-sequence sidecar for the audit |
@@ -205,7 +205,7 @@ The jersey consolidation rule is fixed to `vote_pool` (see
 | Flag | Default | On means | Where |
 |---|---|---|---|
 | `modules.interpolation.cfg.enabled` | `false` | fill tracklet gaps of `1 < dt < n_dti` frames by linear interpolation (`n_dti`, `n_min` — untuned) | `configs/modules/interpolation/dti.yaml` |
-| detector + tracker conf floor | `0.1` / `0.1` | lowering **both** to `0.05` is the only way to make BoT-SORT's BYTE low band non-empty; an A/B, not a code change | `bbox_detector` `min_confidence` + `track_low_thresh` |
+| detector + tracker conf floor | `0.35` / `0.05` | the detector floor (`0.35`) is above `track_high_thresh` (`0.3`), so every detection reaches BoT-SORT in the BYTE **high** band and the low band `[track_low_thresh, 0.3]` is empty; to feed BYTE's low-score second association, lower `min_confidence` below `0.3` (and `track_low_thresh` to taste); an A/B, not a code change | `bbox_detector` `min_confidence` + `track_low_thresh` |
 
 The GTA-Link tuning tool (`scripts/tune_gta_kaggle.py`) was removed with the GTA-Link
 stage. `tracklet_split` has two parameters (`eps`, `min_samples` in

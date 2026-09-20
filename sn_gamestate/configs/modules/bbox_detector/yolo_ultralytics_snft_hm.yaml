@@ -1,6 +1,6 @@
 # YOLO11-L "HM" fine-tune (single-class person), weights fetched from Hugging Face —
 # the ALTERNATIVE detector. Same stage module and identical inference operating point
-# as yolo_ultralytics_snft.yaml (imgsz 1280, conf floor 0.1 kept with `>=`, iou 0.7,
+# as yolo_ultralytics_snft.yaml (imgsz 1280, conf floor 0.35 with `>=`, iou 0.7,
 # max_det 300, RGB->BGR fix, fp16 on CUDA), so a run under this config differs from
 # the default ONLY in the detector weights.
 #
@@ -33,7 +33,7 @@ _target_: sn_gamestate.bbox_detector.yolo_snft_api.YOLOUltralyticsSNFT
 batch_size: 4
 cfg:
   path_to_checkpoint: ${hf:Ynniss/YOLOv11L_HM,best.zip,yolov11l_hm_best.pt}
-  min_confidence: 0.1
+  min_confidence: 0.35
   imgsz: 1280
   iou: 0.7
   max_det: 300
