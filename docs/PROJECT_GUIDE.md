@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-`sn_gamestate` is a SoccerNet Game State Recognition (GSR) pipeline built on the TrackLab framework. From a SoccerNet-GS video clip (image frames per `SNGS-*` sequence) it produces, for every player/referee, a persistent identity tracked across frames, a pitch-space position, a team side and role, and a jersey number — the full "game state." The pipeline runs as an ordered sequence of TrackLab modules: it detects people (YOLO11-L), tracks them (BoT-SORT + OSNet-AIN with camera-motion compensation), labels crop occlusion, calibrates the camera and projects boxes to the pitch (BroadTrack), gates off-pitch tracklets, splits tracklets into per-identity fragments (DBSCAN), embeds team appearance and clusters into two teams (osnet_team), recognizes jersey numbers (the vendored `jn_gsr` GSR plugin: legibility → DBNet++ → PARSeq+SATRN → vote pool), merges fragments into final trajectories (label- and appearance-aware `traj_refine`), assigns role/team side by geometry and appearance rules, votes a final per-tracklet jersey number, and audits every component. The final per-detection dataframe is saved to `states/sn-gamestate.pklz`, rendered as broadcast overlays plus a radar minimap, and scored with GS-HOTA and reference metrics.
+`sn_gamestate` is a SoccerNet Game State Recognition (GSR) pipeline built on the TrackLab framework. From a SoccerNet-GS video clip (image frames per `SNGS-*` sequence) it produces, for every player/referee, a persistent identity tracked across frames, a pitch-space position, a team side and role, and a jersey number — the full "game state." The pipeline runs as an ordered sequence of TrackLab modules: it detects people (YOLO11-L), tracks them (BoT-SORT + OSNet-AIN with camera-motion compensation), labels crop occlusion, calibrates the camera and projects boxes to the pitch (BroadTrack), gates off-pitch tracklets, embeds team appearance and clusters into two teams (osnet_team), recognizes jersey numbers (the vendored `jn_gsr` GSR plugin: legibility → DBNet++ → PARSeq+SATRN → vote pool), merges the tracker's tracklets into final trajectories (label- and appearance-aware `traj_refine`; multi-crop detections are ignored until its stage-3 duplicate resolution), assigns role/team side by geometry and appearance rules, votes a final per-tracklet jersey number, and audits every component. The final per-detection dataframe is saved to `states/sn-gamestate.pklz`, rendered as broadcast overlays plus a radar minimap, and scored with GS-HOTA and reference metrics.
 
 ## 2. Project layout
 
@@ -27,8 +27,6 @@ repo_prod_v3/
 │   ├── track/
 │   │   ├── bot_sort.py                     # BoT-SORT + OSNet-AIN + SOF tracker stage
 │   │   ├── hf_resolver.py                  # ${hf:...} OmegaConf resolver
-│   │   ├── tracklet_split.py               # split-only DBSCAN algorithm (numpy)
-│   │   ├── tracklet_split_api.py           # TrackLab wrapper for tracklet split
 │   │   └── interpolation.py               # DTI linear interpolation (disabled)
 │   ├── crop_filter/crop_filter_api.py     # single/multi overlap labels
 │   ├── calibration/broadtrack_api.py      # BroadTrack camera calibration + pitch projection
@@ -81,13 +79,12 @@ Execution order is defined by `pipeline:` in `sn_gamestate/configs/soccernet.yam
 | 3 | `crop_filter` | `sn_gamestate/crop_filter/crop_filter_api.py` | `bbox_ltwh`, `image_id`, `track_id` | `crop_single`, `crop_rT`, `crop_rB`, `crop_trigger` |
 | 4 | `calibration` | `sn_gamestate/calibration/broadtrack_api.py` | `bbox_ltwh`, `image_id`, frames | `bbox_pitch`, per-frame `parameters` |
 | 5 | `pitch_gate` | `sn_gamestate/pitch_gate/pitch_gate_api.py` | `track_id`, `bbox_pitch` | `track_id` (nulled off-pitch), `track_id_pregate`, `pitch_gate_offpitch`, `pitch_mean_x`, `pitch_mean_y` |
-| 6 | `tracklet_split` | `sn_gamestate/track/tracklet_split_api.py` | `track_id`, `bbox_ltwh`, `image_id`, `crop_single` | `track_id` (fragments), `track_id_presplit` |
-| 7 | `team_embed` | `sn_gamestate/team/team_embed_api.py` | `track_id`, `bbox_ltwh`, `image_id`, `crop_single` | `team_embedding`, `team_cluster`, `team_cluster_nearest` |
-| 8 | `jersey_number_detect` | `sn_gamestate/jersey/jn_gsr_api.py` | `track_id`, `bbox_ltwh`, `image_id`, `crop_single`, `file_path` | `jersey_number_detection`, `jersey_number_confidence`, `jersey_number_candidates`, `jersey_number_maxconf` |
-| 9 | `traj_refine` | `sn_gamestate/refine/traj_refine_api.py` | fragments + `team_cluster` + jersey evidence + embeddings | `track_id` (final), `track_id_prerefine`, unified jersey + `team_cluster` |
-| 10 | `role_team` | `sn_gamestate/team/role_team_api.py` | `track_id`, `image_id`, `bbox_ltwh`, `bbox_pitch`, `crop_single`, `jersey_number_detection` | `role`, `team` |
-| 11 | `tracklet_agg` | `tracklab.wrappers.MajorityVoteTracklet` | `jersey_number` per tracklet | voted `jersey_number` |
-| 12 | `audit` | `sn_gamestate/audit/run_audit_api.py` | all columns + all sidecars | `audit/<seq>.json` verdicts (read-only) |
+| 6 | `team_embed` | `sn_gamestate/team/team_embed_api.py` | `track_id`, `bbox_ltwh`, `image_id`, `crop_single` | `team_embedding`, `team_cluster`, `team_cluster_nearest` |
+| 7 | `jersey_number_detect` | `sn_gamestate/jersey/jn_gsr_api.py` | `track_id`, `bbox_ltwh`, `image_id`, `crop_single`, `file_path` | `jersey_number_detection`, `jersey_number_confidence`, `jersey_number_candidates`, `jersey_number_maxconf` |
+| 8 | `traj_refine` | `sn_gamestate/refine/traj_refine_api.py` | tracklets + `team_cluster` + jersey evidence + embeddings | `track_id` (final), `track_id_prerefine`, unified jersey + `team_cluster` |
+| 9 | `role_team` | `sn_gamestate/team/role_team_api.py` | `track_id`, `image_id`, `bbox_ltwh`, `bbox_pitch`, `crop_single`, `jersey_number_detection` | `role`, `team` |
+| 10 | `tracklet_agg` | `tracklab.wrappers.MajorityVoteTracklet` | `jersey_number` per tracklet | voted `jersey_number` |
+| 11 | `audit` | `sn_gamestate/audit/run_audit_api.py` | all columns + all sidecars | `audit/<seq>.json` verdicts (read-only) |
 
 ## 4. Stage reference
 
@@ -191,22 +188,7 @@ Execution order is defined by `pipeline:` in `sn_gamestate/configs/soccernet.yam
   - `cfg.audit_dir = ${project_dir}/audit/pitch_gate` — per-sequence sidecar directory.
 - **Data columns:** in = `track_id`, `bbox_pitch`; out = `track_id`, `track_id_pregate`, `pitch_gate_offpitch`, `pitch_mean_x`, `pitch_mean_y`; sidecar `<audit_dir>/<sequence>.json`.
 
-### 4.6 Tracklet split — `tracklet_split` (SPLITTER, stage 1)
-
-- **Files:**
-  - `sn_gamestate/track/tracklet_split.py` — pure NumPy/scikit-learn split-only algorithm.
-  - `sn_gamestate/track/tracklet_split_api.py` — TrackLab VideoLevelModule wrapper (OSNet-AIN embedding, relabel, self-checks, audit).
-- **Key classes/functions:** `FRAG_BASE (=10000)`, `_unit`, `_centroid`, `_centers`, `split_tracklet(U,single,frames,boxes,eps,min_samples)`, `split_video(...)`; wrapper `TrackletSplit` with `_extract_features`, `process`, `_write`, and `sequence_name`. Splits each tracklet's SINGLE crops with DBSCAN into fragments; single NOISE → nearest centroid; multi GHOSTS attach by time→space→label; all-multi tracklets dissolved video-wide; fragment id `tid*FRAG_BASE+label`, renumbered 1..T.
-- **Config:** `sn_gamestate/configs/modules/tracklet_split/tracklet_split.yaml`
-  - `_target_ = sn_gamestate.track.tracklet_split_api.TrackletSplit`
-  - `cfg.ain_repo = Ynniss/osnet_ain`, `cfg.ain_file = best_ain_full.zip`, `cfg.ain_revision = d78f65d…`, `cfg.ain_sha256 = a0a7e42…`, `cfg.ain_local_path = null` — OSNet-AIN pin (matches tracker).
-  - `cfg.eps = 0.2` — DBSCAN eps on cosine distance, per tracklet over SINGLE detections.
-  - `cfg.min_samples = 5` — DBSCAN min_samples; fewer singles → one fragment.
-  - `cfg.batch_size = 64` — crops per forward pass.
-  - `cfg.audit_dir = ${project_dir}/audit/tracklet_split` — sidecar directory.
-- **Data columns:** in = `track_id`, `bbox_ltwh`, `image_id`, `crop_single`; out = `track_id` (fragments), `track_id_presplit`; sidecar `<audit_dir>/<sequence>.json`.
-
-### 4.7 Team embedding & clusters — `team_embed`
+### 4.6 Team embedding & clusters — `team_embed`
 
 - **Files:** `sn_gamestate/team/team_embed_api.py` — per-fragment team descriptor from sampled single crops and 2-means clusters. Shared embedders live in `sn_gamestate/reid/osnet_ain.py` and `sn_gamestate/reid/osnet_team.py` (see §5).
 - **Key classes/functions:** `TeamEmbedding(VideoLevelModule)` with `.process` (sample single crops on the `pos_stride` grid, embed with osnet_team, L2-normalised median descriptor per fragment, 2-means), `._model`, `._write`; helpers `sequence_name`, `frame_index`.
@@ -221,7 +203,7 @@ Execution order is defined by `pipeline:` in `sn_gamestate/configs/soccernet.yam
   - `audit_dir = ${project_dir}/audit/team_embed` — sidecar directory.
 - **Data columns:** in = `track_id`, `bbox_ltwh`, `image_id`, `crop_single`; out = `team_embedding`, `team_cluster` (0/1), `team_cluster_nearest`; sidecar `<audit_dir>/<sequence>.json`.
 
-### 4.8 Jersey number — `jersey_number_detect`
+### 4.7 Jersey number — `jersey_number_detect`
 
 - **Files:** `sn_gamestate/jersey/jn_gsr_api.py` — TrackLab video-level driver that runs the vendored `jn_gsr` plugin as a subprocess (see §6 for the plugin files).
 - **Key classes/functions:** `JNGsrTrackletRecognizer(VideoLevelModule)` with `.process`, `._build_manifest`, `._manifest_hash`, `._ckpt_id`, `._launch_workers`; module `detect_gpus`; constants `RULE='vote_pool'`, `SCHEMA=2`, `PARSEQ_CKPT`, `SATRN_CKPT`, `UNNUMBERED='-1'`.
@@ -244,7 +226,7 @@ Execution order is defined by `pipeline:` in `sn_gamestate/configs/soccernet.yam
   - `cfg.rule` — fixed `vote_pool` (setting it makes the stage refuse to construct).
 - **Data columns:** in = `track_id`, `bbox_ltwh`, `image_id`, `crop_single`, `file_path`; out = `jersey_number_detection`, `jersey_number_confidence`, `jersey_number_candidates`, `jersey_number_maxconf`; artifacts `jn_cache/<seq>.<mhash12>.json`, per-worker `shard_<i>.json`.
 
-### 4.9 Trajectory refinement — `traj_refine` (MERGER, stage 2 — the one merge)
+### 4.8 Trajectory refinement — `traj_refine` (MERGER, stage 2 — the one merge)
 
 - **Files:**
   - `sn_gamestate/refine/traj_refine.py` — pure NumPy three-phase merger + number-conflict resolution + stage-3 duplicate-frame resolution.
@@ -252,14 +234,14 @@ Execution order is defined by `pipeline:` in `sn_gamestate/configs/soccernet.yam
 - **Key classes/functions:** `DIGITS_1_99`, `score_of`, `pair_maxconf`, `combine_cand`, `ranked_labels`, `_Cluster` (`.key`, `.centroid()` mean/Stage-3, `.median_centroid()` merge, `.absorb()`), `_dist`, `_in_s1`/`_in_s2`, `_phase_s1`, `_resolve_conflict`, `_agglomerate`, `_phase_s2`, `_phase_final`, `_stage3`, `refine_video`. Wrapper: `TrajRefine(VideoLevelModule)`, `_is_null`, `_model`, `_extract_features`, `_track_info`, `process`, `_write`. Partitions fragments into S1 (cluster+number known) and S2 (cluster known, number unknown); S1 label-driven merges (no threshold), S2 median-centroid merging within S2 at `dist<=tau`, FINAL agglomerative over survivors under same-cluster + disjoint clean frames + no contradicting numbers at `dist<=tau`; stage 3 resolves (frame,traj) collisions.
 - **Config:** `sn_gamestate/configs/modules/traj_refine/traj_refine.yaml`
   - `_target_ = sn_gamestate.refine.traj_refine_api.TrajRefine`
-  - `cfg.ain_repo = Ynniss/osnet_ain`, `cfg.ain_file = best_ain_full.zip`, `cfg.ain_revision = d78f65d…`, `cfg.ain_sha256 = a0a7e42…`, `cfg.ain_local_path = null` — OSNet-AIN pin (must match tracklet_split).
+  - `cfg.ain_repo = Ynniss/osnet_ain`, `cfg.ain_file = best_ain_full.zip`, `cfg.ain_revision = d78f65d…`, `cfg.ain_sha256 = a0a7e42…`, `cfg.ain_local_path = null` — OSNet-AIN pin (must match the tracker's).
   - `cfg.enabled = true` — master switch; false writes only snapshots + sidecar.
   - `cfg.tau = 0.60` — appearance merge threshold (`1 - dot` of the two clusters' clean-crop **median** centroids, each recomputed over its full membership after every merge) for S2 and FINAL; the pipeline's only merge threshold. Stage 3 keeps the mean centroid.
   - `cfg.batch_size = 64` — crops per forward pass.
   - `cfg.audit_dir = ${project_dir}/audit/traj_refine` — sidecar directory.
 - **Data columns:** in = `track_id`, `bbox_ltwh`, `image_id`, `crop_single`, `team_cluster`, `jersey_number_detection`, `jersey_number_confidence`, `jersey_number_candidates`, `team_embedding`, `file_path`; out = `track_id` (final), `track_id_prerefine`, unified `jersey_number_detection`/`_confidence`/`_maxconf`, `*_prerefine` snapshots, unified `team_cluster` (+ `team_cluster_prerefine`), `team_embedding = None`; sidecar `<audit_dir>/<sequence>.json`.
 
-### 4.10 Role & team-side assignment — `role_team`
+### 4.9 Role & team-side assignment — `role_team`
 
 - **Files:**
   - `sn_gamestate/team/role_team_api.py` — active role_team stage.
@@ -280,7 +262,7 @@ Execution order is defined by `pipeline:` in `sn_gamestate/configs/soccernet.yam
   - `cfg.params.gk_rel = 0.85` — GK relative-depth gate (`|mean x| > gk_rel * max|mean x|`).
 - **Data columns:** in = `track_id`, `image_id`, `bbox_ltwh`, `bbox_pitch`, `crop_single`, `jersey_number_detection`; out = `role`, `team`; sidecar `<audit_dir>/<sequence>.json`.
 
-### 4.11 Tracklet aggregation — `tracklet_agg`
+### 4.10 Tracklet aggregation — `tracklet_agg`
 
 - **Files:** module class `tracklab.wrappers.MajorityVoteTracklet` (framework-provided).
 - **Config:** `sn_gamestate/configs/modules/tracklet_agg/voting_jn.yaml`
@@ -288,10 +270,10 @@ Execution order is defined by `pipeline:` in `sn_gamestate/configs/soccernet.yam
   - `cfg.attributes = ["jersey_number"]` — majority-vote the jersey number per tracklet; winner written to every row.
 - **Data columns:** in/out = `jersey_number` (voted per track).
 
-### 4.12 Audit — `audit`
+### 4.11 Audit — `audit`
 
 - **Files:** `sn_gamestate/audit/run_audit_api.py` — final, read-only per-component verdict stage.
-- **Key classes/functions:** `RunAudit(VideoLevelModule)` with `.process` (13 checks, writes `<seq>.json`); `Check` (severity order INFO<PASS<WARN<FAIL); `_check_detector`, `_check_track`, `_check_tracker_internals`, `_check_tracklet_split`, `_check_crop_filter`, `_check_calibration`, `_check_pitch_gate`, `_check_team_embed`, `_check_role_team`, `_check_jersey`, `_check_traj_refine`, `_check_tracklet_agg`, `_check_visualization`; helpers `_eligible_tids`, `_has_single`, `_fragments_without_single`, `_find_track_sidecar`, `_read_sidecar`, `_ckpt_id`, `_sha256`, `_per_track_constant`, `_tid`, `_is_nan`, `_is_number`, `_is_float`, `_share`.
+- **Key classes/functions:** `RunAudit(VideoLevelModule)` with `.process` (12 checks, writes `<seq>.json`); `Check` (severity order INFO<PASS<WARN<FAIL); `_check_detector`, `_check_track`, `_check_tracker_internals`, `_check_crop_filter`, `_check_calibration`, `_check_pitch_gate`, `_check_team_embed`, `_check_role_team`, `_check_jersey`, `_check_traj_refine`, `_check_tracklet_agg`, `_check_visualization`; helpers `_eligible_tids`, `_has_single`, `_fragments_without_single`, `_find_track_sidecar`, `_read_sidecar`, `_ckpt_id`, `_sha256`, `_per_track_constant`, `_tid`, `_is_nan`, `_is_number`, `_is_float`, `_share`.
 - **Config:** `sn_gamestate/configs/modules/audit/run_audit.yaml`
   - `_target_ = sn_gamestate.audit.RunAudit`
   - `cfg.out_dir = ${project_dir}/audit` — verdict JSON output.
@@ -299,14 +281,13 @@ Execution order is defined by `pipeline:` in `sn_gamestate/configs/soccernet.yam
   - `cfg.calib_min_score = ${modules.calibration.cfg.min_score}` — lost-frame threshold.
   - `cfg.parseq_ckpt = parseq_gsr_ft_s1.ckpt`, `cfg.satrn_ckpt = recog2/best_recog_word_acc_epoch_10.pth` — checkpoints whose sha256 must match the jersey blob.
   - `cfg.jn_single_crops_only = ${modules.jersey_number_detect.cfg.single_crops_only}`.
-  - `cfg.track_sidecar_dir`, `cfg.tracklet_split_sidecar_dir`, `cfg.team_embed_sidecar_dir`, `cfg.role_team_sidecar_dir`, `cfg.pitch_gate_sidecar_dir`, `cfg.traj_refine_sidecar_dir` — each stage's `audit_dir`.
-  - `cfg.expected_tracker.{ain_sha256_track, ain_sha256_tracklet_split, ain_file_track, ain_file_tracklet_split, ain_revision_track, ain_revision_tracklet_split, appearance_thresh, sof_scale}` — declared-vs-ran tracker values; enforces track-vs-`tracklet_split` OSNet-AIN equality on file, revision **and** sha256.
-  - `cfg.expected_tracklet_split.{eps, min_samples, ain_sha256}` — declared splitter values.
+  - `cfg.track_sidecar_dir`, `cfg.team_embed_sidecar_dir`, `cfg.role_team_sidecar_dir`, `cfg.pitch_gate_sidecar_dir`, `cfg.traj_refine_sidecar_dir` — each stage's `audit_dir`.
+  - `cfg.expected_tracker.{ain_sha256_track, ain_file_track, ain_revision_track, appearance_thresh, sof_scale}` — declared-vs-ran tracker values.
   - `cfg.expected_crop_filter.{thr_target, thr_other, contam_mode}` — used to recompute labels.
   - `cfg.expected_team_embed.{sha256, pos_stride, crops_per_track, cluster_method, outlier_k}`.
   - `cfg.expected_role_team.params`, `cfg.expected_pitch_gate.{enabled, margin_m}`.
-  - `cfg.expected_traj_refine.{enabled, tau, ain_sha256, ain_sha256_tracklet_split}`.
-  - Thresholds: `empty_frames_warn=0.20`, `tracked_warn=0.50`, `single_share_warn=0.30`, `pitch_missing_warn=0.05`, `embed_missing_warn=0.01`, `off_grid_warn=0.05`, `jn_min_eligible_for_zero_fail=10`, `radar_skipped_tracked_warn=0.05`, `cmc_identity_warn=0.02`, `crop_clipped_warn=0.001`, `zero_emb_warn=0.01`, `tracklet_split_zero_emb_warn=0.01`, `pitch_gate_gated_warn=0.50`, `pitch_gate_no_position_warn=0.05`, `calib_lost_frames_warn=0.10`.
+  - `cfg.expected_traj_refine.{enabled, tau, ain_sha256, ain_sha256_track}` — the merger's pin must equal the tracker's.
+  - Thresholds: `empty_frames_warn=0.20`, `tracked_warn=0.50`, `single_share_warn=0.30`, `pitch_missing_warn=0.05`, `embed_missing_warn=0.01`, `off_grid_warn=0.05`, `jn_min_eligible_for_zero_fail=10`, `radar_skipped_tracked_warn=0.05`, `cmc_identity_warn=0.02`, `crop_clipped_warn=0.001`, `zero_emb_warn=0.01`, `pitch_gate_gated_warn=0.50`, `pitch_gate_no_position_warn=0.05`, `calib_lost_frames_warn=0.10`.
 - **Data columns:** in = all detection columns + all sidecars; out = `audit/<seq>.json` (never modifies detections).
 
 ## 5. Shared components
@@ -315,7 +296,7 @@ Execution order is defined by `pipeline:` in `sn_gamestate/configs/soccernet.yam
 
 | Embedder | File | Input | Output | Used by |
 |----------|------|-------|--------|---------|
-| **OSNet-AIN** | `sn_gamestate/reid/osnet_ain.py` | BGR crops, 256×128, ImageNet norm, fp16 autocast on CUDA | (N,dim) L2-normalised float32 | tracker (`bot_sort.py`), `tracklet_split`, `traj_refine` |
+| **OSNet-AIN** | `sn_gamestate/reid/osnet_ain.py` | BGR crops, 256×128, ImageNet norm, fp16 autocast on CUDA | (N,dim) L2-normalised float32 | tracker (`bot_sort.py`), `traj_refine` |
 | **osnet_team** | `sn_gamestate/reid/osnet_team.py` | RGB crops, 128×64 on grey-110 letterbox, flip TTA, fp32, 256-d | (N,dim) L2-normalised float32 | `team_embed`, `role_team` |
 
 - **`osnet_ain.py`** key symbols: `OsnetAin.embed`, `from_config`, `resolve_checkpoint`/`load_checkpoint`/`_validate_checkpoint`, `build_backbone` (shared backbone factory used by osnet_team too), `_Net` (backbone→GAP→fc→BNNeck→{classifier, role_head}), `letterbox`/`crop_ltrb`/`sha256`; constants `REPO_ID=Ynniss/osnet_ain`, `FILENAME=best_ain_full.zip`, `REVISION=d78f65d…`, `SHA256=a0a7e42…`, `TARGET_ASPECT=2.0`.
@@ -374,10 +355,10 @@ Geometry library used by the BroadTrack stage and the reference-metrics harness.
 ## 7. Configuration system
 
 - **Packaging & plugin registration.** `pyproject.toml` pins the runtime (Python 3.9, torch 1.13.1, tracklab 1.3.24) and registers `[project.entry-points.tracklab_plugin] sn_gamestate = sn_gamestate.config_finder:ConfigFinder`. `sn_gamestate/config_finder.py` (`ConfigFinder`, `config_package = 'pkg://sn_gamestate.configs'`) tells Hydra where the configs live and imports `sn_gamestate.track.hf_resolver` to register the `${hf:...}` resolver. `sn_gamestate/configs/__init__.py` makes the config package importable; `sn_gamestate/__init__.py` exposes `__version__`. Per-package `__init__.py` shims re-export stage classes (`crop_filter.CropFilter`, `pitch_gate.PitchGate`, `team.TeamEmbedding`/`RoleTeamAssignment`, `audit.RunAudit`, `visualization.Radar`/`CompletePlayerBBox`, …) so the short `_target_` strings in the module configs resolve; `refine/` and `jersey/` keep empty `__init__`, so their `_target_` uses the full submodule path (e.g. `sn_gamestate.refine.traj_refine_api.TrajRefine`).
-- **Master config.** `sn_gamestate/configs/soccernet.yaml` is the single Hydra entry config. Its `defaults` list composes `dataset=soccernet_gs`, `eval=gs_hota`, `engine=offline`, `visualization=gamestate`, and one file per module (`bbox_detector=yolo_ultralytics_snft_hm`, `track=botsort_ain`, `crop_filter=overlap_tracked`, `tracklet_split=tracklet_split`, `interpolation=dti`, `calibration=broadtrack`, `pitch_gate=pitch_gate`, `team_embed=osnet_team`, `role_team=rules`, `jersey_number_detect=jn_gsr`, `traj_refine=traj_refine`, `tracklet_agg=voting_jn`, `audit=run_audit`). The `pipeline:` list fixes the executed order (`interpolation` is composed but excluded).
+- **Master config.** `sn_gamestate/configs/soccernet.yaml` is the single Hydra entry config. Its `defaults` list composes `dataset=soccernet_gs`, `eval=gs_hota`, `engine=offline`, `visualization=gamestate`, and one file per module (`bbox_detector=yolo_ultralytics_snft_hm`, `track=botsort_ain`, `crop_filter=overlap_tracked`, `interpolation=dti`, `calibration=broadtrack`, `pitch_gate=pitch_gate`, `team_embed=osnet_team`, `role_team=rules`, `jersey_number_detect=jn_gsr`, `traj_refine=traj_refine`, `tracklet_agg=voting_jn`, `audit=run_audit`). The `pipeline:` list fixes the executed order (`interpolation` is composed but excluded).
 - **Key master-config knobs:**
   - `hf_weights_repo = Ynniss/sn-gamestate-weights` — repo for `${hf:...}` weight fetches.
-  - `pipeline = [bbox_detector, track, crop_filter, calibration, pitch_gate, tracklet_split, team_embed, jersey_number_detect, traj_refine, role_team, tracklet_agg, audit]`.
+  - `pipeline = [bbox_detector, track, crop_filter, calibration, pitch_gate, team_embed, jersey_number_detect, traj_refine, role_team, tracklet_agg, audit]`.
   - `experiment_name = sn-gamestate`; `home_dir = ${oc.env:HOME}`; `data_dir = ${project_dir}/data`; `model_dir = ${project_dir}/pretrained_models`.
   - `use_tensorrt = false`; `trt_dir = ${model_dir}/trt`; `num_cores = 4`; `use_wandb = False`; `use_rich = True`.
   - `modules.bbox_detector.batch_size = 4`; `modules.track.batch_size = 64`.
@@ -416,7 +397,6 @@ Geometry library used by the BroadTrack stage and the reference-metrics harness.
 | `tests/test_pitch_gate.py` | Pitch-gate rule, stage contract, enable switch, sidecar, audit check on synthetic tracklets |
 | `tests/test_rules_equivalence.py` | Ported `team/rules.py` produces identical roles/teams/reasons/outliers/tables as `notebook_reference` |
 | `tests/test_stages.py` | End-to-end `crop_filter → team_embed → role_team` on 60 synthetic frames with a synthetic osnet_team checkpoint; load, preprocessing, flip TTA, column contracts |
-| `tests/test_tracklet_split.py` | 16 pure-numpy tests for the split-only algorithm (DBSCAN, ghost attachment, all-multi dissolution, invariants, determinism) |
 | `tests/test_traj_refine.py` | 21 pure-numpy tests for the three-phase merger + stage-3 duplicate-frame resolution |
 | `tests/test_visualization.py` | Visualization colour contract: trajectory-wide role/team labels drawn on every row, same box colour and radar disc; unlabelled rows undrawn |
 
@@ -424,7 +404,7 @@ Geometry library used by the BroadTrack stage and the reference-metrics harness.
 
 | Path | Contents |
 |------|----------|
-| `README.md` | Top-level project reference: pipeline stage table, `tracklet_split`/`pitch_gate` sections, install, run, reference metrics, layout |
+| `README.md` | Top-level project reference: pipeline stage table, `pitch_gate` section, install, run, reference metrics, layout |
 | `docs/PIPELINE_REFERENCE.md` | Canonical pipeline description: stage order/rationale, three execution environments, per-stage `_target_` and parameters, artifact sources/fallbacks/integrity, run/verify commands, change log |
 | `docs/KAGGLE_GUIDE.md` | Verified Kaggle (GPU T4×2) procedure: session requirements, disk layout, environment rules, network fallback, one-sequence recipe, timings and reference results |
 | `docs/CALIBRATION_FIX.md` | Best-of-N draw selection and the CALIB_DATASET freeze for BroadTrack draw variance |
@@ -452,7 +432,7 @@ Geometry library used by the BroadTrack stage and the reference-metrics harness.
 | `category_id` | bbox_detector | Fixed value 1 (person) |
 | `track_bbox_ltwh` | track | Tracked bounding box (ltwh) |
 | `track_bbox_conf` | track | Tracker output confidence |
-| `track_id` | track (rewritten by pitch_gate, tracklet_split, traj_refine) | Persistent object identity; NaN off-pitch after pitch_gate; fragment id after split; final trajectory id after refine |
+| `track_id` | track (rewritten by pitch_gate, traj_refine) | Persistent object identity; NaN off-pitch after pitch_gate; final trajectory id after refine |
 | `crop_single` | crop_filter | True iff `crop_rT <= thr_target` and `crop_rB < thr_other` (clean single-person crop) |
 | `crop_rT` | crop_filter | Max over contaminators of `inter(T,B)/area(T)` |
 | `crop_rB` | crop_filter | Max over contaminators of `inter(T,B)/area(B)` |
@@ -463,7 +443,6 @@ Geometry library used by the BroadTrack stage and the reference-metrics harness.
 | `pitch_gate_offpitch` | pitch_gate | True on rows of an off-pitch tracklet |
 | `pitch_mean_x` | pitch_gate | Tracklet mean x (m); NaN when untracked / no projection |
 | `pitch_mean_y` | pitch_gate | Tracklet mean y (m); NaN when untracked / no projection |
-| `track_id_presplit` | tracklet_split | Per-row copy of the incoming (pre-split) track id |
 | `team_embedding` | team_embed | osnet_team descriptor on each sampled single row; cleared (None) by traj_refine |
 | `team_cluster` | team_embed (unified by traj_refine) | 0/1 team cluster id per fragment; NaN when unclustered |
 | `team_cluster_nearest` | team_embed | 0/1 nearest-centroid id per embedded fragment (diagnostic) |

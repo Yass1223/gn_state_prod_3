@@ -14,7 +14,7 @@
 # coverage carrier; team_embedding itself is dropped by traj_refine after the
 # merge, and the post-refine role_team stage recomputes appearance from clean
 # crops). No left/right naming and no roles here -- those are assigned after
-# traj_refine. Runs after tracklet_split, before jersey_number_detect.
+# traj_refine. Runs after pitch_gate, before jersey_number_detect.
 #
 # Checkpoint: Ynniss/osnet_team / osnet_team_best.pt — the notebook's model
 # (OSNet x1.0, 128x64 crops on grey 110, 256-d, fp32 + flip TTA). Widths and the

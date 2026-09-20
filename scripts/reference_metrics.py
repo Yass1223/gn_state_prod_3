@@ -30,7 +30,7 @@ Rigor rules
 * Any metric that cannot be computed is reported as null with a "reason" — never a
   silently wrong number.
 * Per-stage attribution: DetA isolates the detector, AssA/IDF1/IDSW isolate association
-  (tracking + ReID). The tracklet_split / traj_refine / tracker / calibration contributions
+  (tracking + ReID). The traj_refine / tracker / calibration contributions
   are measured by running this script on states produced by different pipeline configs
   (e.g. traj_refine enabled vs disabled, NBJW vs BroadTrack) and comparing the saved
   files; pass several

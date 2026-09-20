@@ -12,10 +12,6 @@
 #   calibration    BroadTrack (EVS, WACV'25) + image-to-pitch -> parameters, bbox_pitch
 #   pitch_gate     off-pitch tracklets (mean bbox_pitch outside  -> track_id NaN on their rows,
 #                  105x68 m + margin_m; on/off switch)             track_id_pregate, pitch_gate_offpitch
-#   tracklet_split DBSCAN tracklet split (SPLIT ONLY) over SINGLE  -> track_id (fragments), track_id_presplit
-#                  detections, on-pitch tracklets only (same OSNet-AIN as the tracker;
-#                  reads crop_single); multi detections are unembedded GHOSTS attached
-#                  by time/space (all-multi tracklets dissolved across the video)
 #   team_embed     osnet_team on sampled SINGLE crops/fragment  -> team_embedding,
 #                  + 2-means TEAM CLUSTERING, every embedded        team_cluster (0/1; NaN only
 #                  fragment -> nearest centroid (kmeans2_nearest,   with no descriptor),
@@ -32,8 +28,8 @@
 #                  numbers, within tau; clean-frame disjointness in every
 #                  phase; centroids clean-only (multi rows are ghosts); duplicate-
 #                  frame resolution with dynamic centroids (stage 3, the ghosts' one
-#                  exception); same OSNet-AIN as track / tracklet_split; DROPS the
-#                  fragment team embeddings after the merge (trajectories carry the
+#                  exception); same OSNet-AIN as the tracker; DROPS the
+#                  per-tracklet team embeddings after the merge (trajectories carry the
 #                  jersey evidence only; team_cluster* kept as inert snapshots)
 #                  -> track_id (trajectories), track_id_prerefine + jersey/cluster snapshots
 #   role_team      per-TRAJECTORY roles and sides, AFTER the merge, recomputed from
@@ -55,7 +51,10 @@
 # detectors internally and emits camera parameters directly.
 # There is NO `reid` (prtreid) stage any more: the team CLUSTER comes from
 # `team_embed`, roles and sides from the post-refine `role_team` (bbox_pitch);
-# the tracker and the tracklet_split stage use OSNet-AIN. `interpolation` is kept as a module but is NOT in
+# the tracker and traj_refine use OSNet-AIN. There is NO splitter stage: the merger
+# works directly on the tracker's (post-gate) tracklets, whose multi-crop detections
+# are ignored until traj_refine's stage 3 (duplicate-frame resolution).
+# `interpolation` is kept as a module but is NOT in
 # the pipeline: it synthesizes rows that carry neither crop labels nor team embeddings.
 #
 # First-time provisioning (both are Docker-free, Kaggle/Lightning friendly):
@@ -81,7 +80,6 @@ defaults:
   - modules/bbox_detector: yolo_ultralytics_snft_hm
   - modules/track: botsort_ain
   - modules/crop_filter: overlap_tracked
-  - modules/tracklet_split: tracklet_split
   - modules/interpolation: dti
   - modules/calibration: broadtrack
   - modules/pitch_gate: pitch_gate
@@ -96,12 +94,12 @@ defaults:
 # Pipeline definition. Order is load-bearing:
 #   * crop_filter right after track: the tracked-only rule needs track_id, and every
 #     later stage reads the same crop_single label;
-#   * calibration then pitch_gate BEFORE tracklet_split: the gate needs bbox_pitch,
-#     and gating first means the splitter never works on off-pitch tracklets;
-#   * tracklet_split before team_embed/jersey (both are fragment-level);
+#   * calibration then pitch_gate BEFORE team_embed/jersey: the gate needs
+#     bbox_pitch, and gating first keeps off-pitch tracklets out of every
+#     later stage (both are tracklet-level);
 #   * team_embed (embedding + TEAM CLUSTER) and jersey_number_detect before
 #     traj_refine: the one merge decides on cluster + number evidence; the
-#     fragment embeddings are dropped once the merge is done;
+#     per-tracklet embeddings are dropped once the merge is done;
 #   * role_team AFTER traj_refine: roles and sides are assigned once, on the
 #     finished trajectories, where the evidence is strongest, from appearance
 #     the stage recomputes itself on clean crops;
@@ -112,7 +110,6 @@ pipeline:
   - crop_filter
   - calibration
   - pitch_gate
-  - tracklet_split
   - team_embed
   - jersey_number_detect
   - traj_refine
@@ -134,7 +131,7 @@ use_tensorrt: false
 trt_dir: "${model_dir}/trt"
 
 # Numerical precision: the YOLO11 detector (ultralytics half) and the OSNet-AIN
-# embedder in `track` + `tracklet_split` (torch autocast on CUDA, fp32 outputs) run fp16,
+# embedder in `track` + `traj_refine` (torch autocast on CUDA, fp32 outputs) run fp16,
 # baked in after the Kaggle fp16/fp32 validation (tracking HOTA 71.61 vs 71.08,
 # GS-HOTA 64.98 vs 64.70, calibration bit-identical; deltas inside run-to-run noise).
 # The team_embed stage runs fp32 with flip TTA, exactly as the notebook it

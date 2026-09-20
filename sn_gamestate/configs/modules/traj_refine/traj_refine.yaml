@@ -1,33 +1,34 @@
 # Label-aware trajectory refinement, run between `jersey_number_detect` and
-# `role_team`: the pipeline's ONE merge, on evidence that does not exist at
-# tracklet_split's position -- the TEAM CLUSTER id (team_embed), the
+# `role_team`: the pipeline's ONE merge, working directly on the tracker's
+# (post-gate) tracklets, on evidence the tracker never had -- the TEAM CLUSTER
+# id (team_embed), the
 # jersey number with its pooled maxconf candidate statistics (jn_gsr_api), and
 # exit/entry geometry. Roles and team sides do NOT exist yet: they are
 # assigned after this stage, on the finished trajectories.
 #
 # GHOST RULE: multi-crop detections enter no merge condition -- no centroid
-# (centroids are means over CLEAN detections only, no fallback), no re-enter
-# anchor, no disjointness test. They follow their fragment through every
-# merge; the one exception is stage 3 (final-trajectory duplicate resolution),
-# which places them by appearance, no-overlap, with dynamic centroids.
+# (centroids are computed over CLEAN detections only, no fallback), no
+# disjointness test. They are IGNORED until stage 3 (final-trajectory
+# duplicate resolution), which places them by appearance, no-overlap, with
+# dynamic centroids; until then they simply follow their tracklet.
 #
 # Method (sn_gamestate/refine/traj_refine.py): THREE PHASES over a partition
-# of the fragments by label knowledge -- S1: cluster AND number known; S2:
-# cluster known, number unknown; a fragment with NO cluster id never merges.
+# of the tracklets by label knowledge -- S1: cluster AND number known; S2:
+# cluster known, number unknown; a tracklet with NO cluster id never merges.
 # Phase S1 merges trajectory pairs with EQUAL cluster and EQUAL number, in
 # descending order of the pair's joint maxconf score, when their clean frame
-# sets are disjoint and their exit/entry sides are consistent -- NO distance
+# sets are disjoint -- NO distance
 # threshold (the two labels together already identify one player); a pair
 # claiming one number at the SAME time is a conflict, resolved by reassigning
 # the lower-maxconf side to its best remaining jersey candidate (an unnumbered
-# loser leaves S1 and joins S2). Phase S2 merges agglomeratively (average
-# linkage) within S2 under equal cluster, clean-frame disjointness and
-# re-enter, distance <= tau. The FINAL phase pools ALL S1 and S2 survivors,
+# loser leaves S1 and joins S2). Phase S2 merges agglomeratively
+# (median-centroid) within S2 under equal cluster and clean-frame
+# disjointness, distance <= tau. The FINAL phase pools ALL S1 and S2 survivors,
 # merged and unmerged alike, and merges agglomeratively under clean-frame
-# disjointness, re-enter, the SAME cluster id and no contradicting numbers
+# disjointness, the SAME cluster id and no contradicting numbers
 # (two different known numbers never merge), distance <= tau.
-# EVERY fragment is in scope (there is no role to exempt anyone). After the
-# merge the fragment-level team embeddings are dropped: trajectories carry the
+# EVERY tracklet is in scope (there is no role to exempt anyone). After the
+# merge the per-tracklet team embeddings are dropped: trajectories carry the
 # jersey evidence only (team_embedding cleared; team_cluster /
 # team_cluster_nearest kept as inert snapshots), and the role_team stage
 # recomputes appearance from clean crops.
@@ -41,13 +42,12 @@
 #
 # Appearance: the tracker's OSNet-AIN, built from the shared module
 # sn_gamestate/reid/osnet_ain.py with the SAME checkpoint pin as
-# modules/track/botsort_ain.yaml and modules/tracklet_split/tracklet_split.yaml, so
-# tau keeps the cosine-distance scale that operating point was tuned on. The run
-# audit fails the run on any pin mismatch against tracklet_split.
+# modules/track/botsort_ain.yaml, so tau keeps the cosine-distance scale that
+# operating point was tuned on. The run
+# audit fails the run on any pin mismatch against the tracker.
 _target_: sn_gamestate.refine.traj_refine_api.TrajRefine
 cfg:
-  # OSNet-AIN checkpoint -- SAME coordinates and digest as modules/track/botsort_ain.yaml
-  # and modules/tracklet_split/tracklet_split.yaml.
+  # OSNet-AIN checkpoint -- SAME coordinates and digest as modules/track/botsort_ain.yaml.
   ain_repo: Ynniss/osnet_ain
   ain_file: best_ain_full.zip
   ain_revision: d78f65ded828f0cbd8dff2a06dcbff4fc6835dfe
@@ -64,7 +64,7 @@ cfg:
   # clusters' MEDIAN unit vectors over clean detections, each median recomputed
   # over the cluster's full membership after every merge), phases S2 and FINAL
   # (phase S1 is label-driven and carries no threshold). The pipeline's ONLY
-  # merge threshold (the splitter never merges). 0.60 is inherited from the
+  # merge threshold. 0.60 is inherited from the
   # mean-centroid operating point; re-tune for the median distance on a
   # validation split.
   tau: 0.60
@@ -77,9 +77,9 @@ cfg:
   # NOT a merge condition -- it is decided by the role_team stage on the
   # final trajectories.
 
-  # Scope: EVERY fragment. Roles do not exist at this point (role_team runs
+  # Scope: EVERY tracklet. Roles do not exist at this point (role_team runs
   # after this stage), so there is no exemption; the merge conditions are the
-  # team cluster (team_embed, REQUIRED -- an unclustered fragment never
+  # team cluster (team_embed, REQUIRED -- an unclustered tracklet never
   # merges) and the jersey number.
 
   batch_size: 64      # crops per appearance forward pass
