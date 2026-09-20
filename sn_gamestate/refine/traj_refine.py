@@ -1,31 +1,31 @@
 """Label-aware trajectory refinement -- the algorithm (``traj_refine`` stage).
 
 Runs AFTER ``team_embed`` and ``jersey_number_detect`` and BEFORE ``role_team``,
-on the tracker's (post-gate) tracklets: the pipeline's ONE merge, deciding on
-the team CLUSTER id (``team_embed``) and the jersey number with its pooled
-maxconf candidate statistics (``jn_gsr_api``). Team sides and
+on the splitter's fragments: the pipeline's ONE merge, deciding on the team
+CLUSTER id (``team_embed``) and the jersey number with its pooled maxconf
+candidate statistics (``jn_gsr_api``). Team sides and
 roles do not exist yet -- they are assigned after this stage, on the finished
-trajectories. Every tracklet is in scope: there is no role to exempt anyone.
+trajectories. Every fragment is in scope: there is no role to exempt anyone.
 
 GHOST RULE. Multi-player (non-``crop_single``) detections take no part in any
 merge condition: they are absent from the clean-frame disjointness test and
 from every centroid (centroids are computed over CLEAN
 non-zero detections ONLY -- there is no fallback to multi rows; a cluster
 without such a detection has no centroid and never merges on appearance).
-Ghost rows simply follow their tracklet through every merge. The ONE place
+Ghost rows simply follow their fragment through every merge. The ONE place
 they are acted on is stage 3, the final-trajectory duplicate resolution.
 
 Inputs, per video (aligned arrays, one entry per TRACKED detection):
 
     E        (n, d) OSNet-AIN embeddings (unit rows; a zero row carries no
-             signal), same checkpoint pin as the tracker so
+             signal), same checkpoint pin as the tracker and tracklet_split so
              the cosine-distance scale of ``tau`` transfers
     single   (n,)  bool, the crop filter's ``crop_single`` label
     frames   (n,)  int, CHRONOLOGICAL frame index (the dataset's ``frame``
              column; equality == same frame, order == time order)
     tids     (n,)  int, the trajectory id each row carries when the stage runs
 
-    tracks   {tid: dict(cluster, number, cand, scope)} per-tracklet labels:
+    tracks   {tid: dict(cluster, number, cand, scope)} per-fragment labels:
              ``cluster`` the team_embed stage's TEAM CLUSTER id (float) or
              None; ``number`` a digit string or None; ``cand`` the jersey
              stage's pooled candidate list ``[[label, mx, conf_sum, votes],
@@ -36,10 +36,10 @@ for label L is ``exp(mx(L)) * conf_sum(L)`` over the pooled frame decodes of
 the two recognisers. When two trajectories merge, the pooled statistics
 combine exactly per that rule -- ``mx = max``, ``conf_sum``/``votes`` add.
 
-THE MERGE RUNS IN THREE PHASES over a partition of the tracklets by label
-knowledge (a tracklet with NO cluster id -- one with no single crop at all,
-or whose sampled crops all failed to embed -- belongs to no partition and
-NEVER merges):
+THE MERGE RUNS IN THREE PHASES over a partition of the fragments by label
+knowledge (a fragment with NO cluster id -- possible only for the splitter's
+kept all-multi degenerates and for fragments whose sampled crops all failed to
+embed -- belongs to no partition and NEVER merges):
 
     S1  cluster known AND number known
     S2  cluster known AND number unknown
@@ -60,7 +60,7 @@ JOINT pooled maxconf (``exp(max(mx_F, mx_G)) * (conf_sum_F + conf_sum_G)``):
     terminates because every action either removes a cluster (merge) or
     shrinks a candidate list's unbanned prefix (conflict).
 
-Phase S2 -- within S2 (including any tracklet demoted from S1), agglomerative
+Phase S2 -- within S2 (including any fragment demoted from S1), agglomerative
 median-centroid merging (group distance = 1 minus the dot product of the two
 clusters' MEDIAN unit vectors over clean detections, each median recomputed
 over the cluster's full clean membership after every merge). Compatible(F, G)

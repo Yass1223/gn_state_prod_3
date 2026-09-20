@@ -76,11 +76,13 @@ def main(argv: list[str] | None = None) -> int:
     # Two runtime dependencies of the `track` stage live OUTSIDE the config graph
     # and deserve the same seconds-not-minutes failure: boxmot (installed with
     # --no-deps, so nothing else vouches for it - see pyproject.toml) and the
-    # shared OSNet-AIN embedder module both `track` and `traj_refine` import.
+    # shared OSNet-AIN embedder module both `track` and `tracklet_split` import. The
+    # splitter algorithm module is listed too: the stage imports it, no config does.
     targets += [
         "boxmot.trackers.botsort.botsort.BotSort",
         "boxmot.motion.cmc.get_cmc_method",
         "sn_gamestate.reid.osnet_ain.from_config",
+        "sn_gamestate.track.tracklet_split.split_video",
         "sn_gamestate.reid.osnet_team.from_config",
         "sn_gamestate.team.rules.run_sequence",
         "sn_gamestate.refine.traj_refine.refine_video",

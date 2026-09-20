@@ -1,7 +1,7 @@
 """Team-appearance embeddings and TEAM CLUSTERS per fragment (``team_embed`` stage).
 
-Runs after ``pitch_gate``: the tracklets it sees are the tracker's on-pitch
-tracklets. For every tracklet, its SINGLE crops (``crop_single``) on the
+Runs after ``tracklet_split``: the tracklets it sees are the splitter's
+fragments. For every fragment, its SINGLE crops (``crop_single``) on the
 position grid (every ``POS_STRIDE``-th frame, at most ``CROPS_PER_TRK`` evenly
 spaced) are embedded with ``osnet_team``; a fragment with no single crop gets
 no embedding. The fragment descriptor is the L2-normalised median of its

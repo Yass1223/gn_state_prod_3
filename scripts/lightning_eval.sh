@@ -6,7 +6,7 @@
 # the cuDNN/torch_shm_manager issue on the Studio.
 #
 # This repo has a SINGLE entry config (`soccernet`): YOLO11-SNFT ->
-# BoT-SORT·SOF (boxmot + OSNet-AIN) -> crop filter -> pitch gate (
+# BoT-SORT·SOF (boxmot + OSNet-AIN) -> crop filter -> tracklet_split (DBSCAN
 # split only, same OSNet-AIN) -> BroadTrack -> osnet_team embeddings ->
 # role/team rules -> jn_pipeline_gsr -> traj_refine (the one merge) -> voting -> audit.
 #

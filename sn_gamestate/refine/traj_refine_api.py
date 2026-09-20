@@ -9,7 +9,7 @@ strongest. The algorithm is in ``sn_gamestate/refine/traj_refine.py``; this
 module supplies its inputs and applies its output:
 
 1. Appearance: one OSNet-AIN embedding per tracked detection, from the same
-   shared module and checkpoint pin as the tracker
+   shared module and checkpoint pin as the tracker and ``tracklet_split``
    (``sn_gamestate/reid/osnet_ain``), so ``tau`` keeps the cosine-distance
    scale it was tuned on. A degenerate box or unreadable frame keeps an
    all-zero feature; a trajectory with no usable embedding never merges.
@@ -128,8 +128,8 @@ class TrajRefine(VideoLevelModule):
         self.audit_dir = Path(str(cfg.audit_dir)) if getattr(cfg, "audit_dir", None) else None
         if self.audit_dir:
             self.audit_dir.mkdir(parents=True, exist_ok=True)
-        # Same appearance model, pin and arithmetic as the tracker; a
-        # pin mismatch against the track config is a run-audit FAIL. Built lazily
+        # Same appearance model, pin and arithmetic as track / tracklet_split; a
+        # pin mismatch against tracklet_split is a run-audit FAIL. Built lazily
         # so a disabled stage costs nothing.
         self._embedder = None
         log.info(f"[traj_refine] enabled {self.enabled}, tau {self.tau}; "
