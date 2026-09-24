@@ -70,13 +70,12 @@ cfg:
 
   # Merge acceptance threshold on the appearance distance (1 - dot of the two
   # clusters' MEDIAN unit vectors over clean detections, each median recomputed
-  # over the cluster's full membership after every merge); it gates the
-  # within-tracklet rule B (phase 0), S2 and FINAL (phase S1 and the
-  # within-tracklet same-number rule A are label-driven, no threshold). The
-  # pipeline's ONLY merge threshold (the splitter never merges). Raised to 0.70
-  # from the inherited 0.60 (mean-centroid operating point); untuned on a
-  # validation split for the median distance.
-  tau: 0.70
+  # over the cluster's full membership after every merge), phases S2 and FINAL
+  # (phase S1 is label-driven and carries no threshold). The pipeline's ONLY
+  # merge threshold (the splitter never merges). 0.60 is inherited from the
+  # mean-centroid operating point; re-tune for the median distance on a
+  # validation split.
+  tau: 0.60
 
   # There is NO re-enter condition: time-disjoint same-cluster fragments face
   # only the label and distance conditions above.

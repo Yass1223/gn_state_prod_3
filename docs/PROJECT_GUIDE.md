@@ -254,7 +254,7 @@ Execution order is defined by `pipeline:` in `sn_gamestate/configs/soccernet.yam
   - `_target_ = sn_gamestate.refine.traj_refine_api.TrajRefine`
   - `cfg.ain_repo = Ynniss/osnet_ain`, `cfg.ain_file = best_ain_full.zip`, `cfg.ain_revision = d78f65d…`, `cfg.ain_sha256 = a0a7e42…`, `cfg.ain_local_path = null` — OSNet-AIN pin (must match tracklet_split).
   - `cfg.enabled = true` — master switch; false writes only snapshots + sidecar.
-  - `cfg.tau = 0.70` — appearance merge threshold (`1 - dot` of the two clusters' clean-crop **median** centroids, each recomputed over its full membership after every merge) for the within-tracklet rule B, S2 and FINAL; the pipeline's only merge threshold. Stage 3 keeps the mean centroid.
+  - `cfg.tau = 0.60` — appearance merge threshold (`1 - dot` of the two clusters' clean-crop **median** centroids, each recomputed over its full membership after every merge) for S2 and FINAL; the pipeline's only merge threshold. Stage 3 keeps the mean centroid.
   - `cfg.batch_size = 64` — crops per forward pass.
   - `cfg.audit_dir = ${project_dir}/audit/traj_refine` — sidecar directory.
 - **Data columns:** in = `track_id`, `bbox_ltwh`, `image_id`, `crop_single`, `team_cluster`, `jersey_number_detection`, `jersey_number_confidence`, `jersey_number_candidates`, `team_embedding`, `file_path`; out = `track_id` (final), `track_id_prerefine`, unified `jersey_number_detection`/`_confidence`/`_maxconf`, `*_prerefine` snapshots, unified `team_cluster` (+ `team_cluster_prerefine`), `team_embedding = None`; sidecar `<audit_dir>/<sequence>.json`.
