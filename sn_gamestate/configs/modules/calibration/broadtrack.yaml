@@ -86,3 +86,30 @@ cfg:
   use_prev_parameters: true
   min_score: 0.3
   max_carry_frames: 0
+
+  # --- temporal stabilisation (deterministic post-processing of the binary's output) ---
+  # The score gate does not remove SUDDEN JUMPS of every player of a frame: the binary
+  # tracks the camera frame to frame and, when the score drops, re-initialises it from
+  # keypoints -- the re-initialised camera disagrees with the drifted frames before it
+  # and all projected positions snap; the same snap happens where a rejected run
+  # (carry-forward of a frozen camera) meets the next accepted frame. Jumps are
+  # detected on PLAYER continuity, independent of the camera: between two consecutive
+  # frames that both have an accepted camera, the median pitch-plane displacement of
+  # the tracks present in both (>= jump_min_tracks) must stay below max_jump_m (at 25
+  # fps a sprint moves a player < 0.5 m/frame). Above it, the lower-scoring frame loses
+  # its anchor status. Anchors are accepted frames with score >= anchor_score that lost
+  # no jump; a run of non-anchor frames that contains a rejected, absent or demoted
+  # frame is replaced by linear interpolation of the camera between the anchors on both
+  # sides when the run is at most max_interp_frames long (2 s); rejected frames with no
+  # anchors in range are interpolated between the nearest accepted frames; whatever is
+  # left falls back to carry-forward above. Continuous runs of weak frames are never
+  # touched. The jump test is re-run on the final cameras and the residual jumps (both
+  # sides confident, or gaps too long to bridge) are written, per frame, to
+  # <calib_dir>/<seq>.stabilise.json together with every frame's source
+  # (binary / interp / interp_weak / carry / none). No ground truth, deterministic
+  # given the calibration JSON. stabilise: false reproduces the previous behaviour.
+  stabilise: true
+  anchor_score: 0.5        # >= min_score; frames at/above it anchor the interpolation
+  max_jump_m: 2.0          # median per-track displacement between consecutive frames
+  jump_min_tracks: 3       # shared tracks needed to test a pair of frames
+  max_interp_frames: 50    # longest run replaced by interpolation (0 = never)

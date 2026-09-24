@@ -91,6 +91,93 @@ When comparing two detector variants in one session, the calibration cache
 constant; otherwise each run would redraw a different calibration and the
 ~9-point variance would mask the detector difference.
 
+## Temporal stabilisation — sudden jumps of the projected positions
+
+### Problem
+
+Independently of the draw variance above, a single draw is not temporally
+stable. The binary tracks the camera frame to frame and, when its line-IoU score
+drops, re-initialises it from keypoints. Two things reach pitch space as a SUDDEN
+JUMP of every player of a frame, followed by a snap back:
+
+- a re-initialisation lands on a camera that disagrees with the drifted frames
+  before it (the drift itself is gradual and keeps a score above `min_score`);
+- a rejected run (`score < min_score`, or the last frame, which the binary
+  never calibrates) was served by carry-forward of a frozen camera, which then
+  snaps to the next accepted camera.
+
+The score gate cannot see either: the jump is between two frames the binary
+scored acceptably, or between a carried frame and an accepted one.
+
+### Fix (`stabilise_sequence`, `sn_gamestate/calibration/broadtrack_api.py`)
+
+Deterministic post-processing of the per-frame cameras, no ground truth:
+
+1. Jump detection on player continuity, independent of the camera: for two
+   consecutive frames that both have an accepted camera, the bottom-middle
+   point of every detection is projected with its own frame's camera and the
+   median displacement over the track ids present in both frames
+   (`jump_min_tracks`) is compared with `max_jump_m`. Players cannot move that
+   far in one frame (25 fps: a sprint is under 0.5 m/frame), so a larger
+   displacement is a camera discontinuity. The lower-scoring frame of the pair
+   (tie: the earlier, propagated one) loses its anchor status.
+2. Anchors are accepted frames with `score >= anchor_score` that lost no jump.
+3. A run of non-anchor frames that contains a rejected, absent or demoted frame
+   is replaced by linear interpolation of the camera parameters (angles on the
+   shortest arc) between the anchors on both sides, when the run is at most
+   `max_interp_frames` long. This removes the carry-then-snap pattern and the
+   drift tail whose scores decay towards a re-initialisation. Continuous runs
+   of weak frames are never touched.
+4. Rejected frames that no anchor pair can bridge are interpolated between the
+   nearest accepted frames; whatever is left falls back to carry-forward
+   (`use_prev_parameters`, `max_carry_frames`) as before.
+5. The jump test is re-run on the final cameras. Residual jumps (both sides
+   confident, or a gap too long to bridge) are reported, not hidden.
+
+Every frame's source (`binary` / `interp` / `interp_weak` / `carry` / `none`),
+the raw and residual jumps and the settings are written to
+`<calib_dir>/<seq>.stabilise.json`. The stage logs a warning when residual
+jumps remain. `stabilise: false` reproduces the previous behaviour exactly.
+
+A sequence without `track_id` (calibration run before tracking, or untracked
+detections) disables the jump test only; the interpolation of rejected runs
+still applies.
+
+### Configuration
+
+`configs/modules/calibration/broadtrack.yaml`:
+
+- `stabilise: true`
+- `anchor_score: 0.5` (must be `>= min_score`)
+- `max_jump_m: 2.0`
+- `jump_min_tracks: 3`
+- `max_interp_frames: 50` (2 s at 25 fps)
+
+The thresholds are not tuned on labels: `max_jump_m` is a physical bound with
+margin for projection noise between two slightly different cameras, and
+`anchor_score` sits between the binary's lost threshold (0.3) and the threshold
+upstream uses to build a tripod (0.6).
+
+### Verification
+
+`tests/test_broadtrack_stabilise.py` runs the installed source text against a
+toy camera (a rigid pitch-plane shift, which is what a wrong homography does to
+every player of a frame): carry-then-snap and drift tails are bridged with no
+residual jump; a scored spike is demoted and bridged; a continuous weak run is
+untouched; a jump between two confident frames is reported as residual; long
+gaps and the last frame fall back to carry-forward; `stabilise: false` is the
+previous behaviour; untracked detections disable the jump test only; angle
+interpolation takes the shortest arc. The `process` path was exercised end to
+end with a stubbed camera on a synthetic sequence (spike + lost run + absent
+last frame): the spike is removed, the lost run is bridged, the sidecar and the
+`bbox_pitch` / `parameters` columns are written with the expected shape.
+
+Not yet measured: the effect on GS-HOTA on real sequences. The `.stabilise.json`
+sidecar makes the before/after jump count of every run inspectable; compare a
+run with `stabilise: false` against the default on the same frozen calibration
+JSON (the cache holds the draw constant, so the difference is the stabilisation
+alone).
+
 ## Residual (unverified)
 
 The root cause of the binary's nondeterminism is not instrumented; the fix
